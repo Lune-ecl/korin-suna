@@ -48,12 +48,16 @@ create table if not exists public.admins (
   user_id uuid primary key references auth.users(id) on delete cascade
 );
 
--- Comptes : connexion par nom d'utilisateur (le site fabrique un e-mail invisible)
+-- Comptes : le nom d'utilisateur est le nom RP (ex. « Ryuta Chiiketsu »).
+-- Le site fabrique un e-mail invisible à partir de ce nom (ryuta.chiiketsu@korin-suna.app).
 create table if not exists public.profiles (
   user_id     uuid primary key references auth.users(id) on delete cascade,
-  username    text not null unique check (username ~ '^[a-z0-9_.-]{3,20}$'),
+  username    text not null unique,
   created_at  timestamptz not null default now()
 );
+alter table public.profiles drop constraint if exists profiles_username_check;
+alter table public.profiles add constraint profiles_username_check
+  check (username = btrim(username) and char_length(username) between 3 and 40);
 
 -- Crée automatiquement le profil quand quelqu'un s'inscrit sur le site
 create or replace function public.handle_new_user()
@@ -63,7 +67,7 @@ set search_path = public
 as $$
 begin
   insert into public.profiles (user_id, username)
-  values (new.id, lower(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))));
+  values (new.id, btrim(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))));
   return new;
 end;
 $$;
@@ -289,4 +293,4 @@ end $$;
 --  seulement cette ligne. Ensuite tu valideras les autres depuis le site.
 -- =============================================================
 -- insert into public.admins (user_id)
---   select user_id from public.profiles where username = 'ton_pseudo';
+--   select user_id from public.profiles where lower(username) = lower('Ton Nom');

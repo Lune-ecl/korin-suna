@@ -16,13 +16,12 @@ Site du **Korin de Suna**, tournoi de 2 contre 2 avec paris en ryos, pour une co
 - Paris : cotes fixées par les orgas pour chaque combat, cote gelée au moment du pari, gain = mise × cote. Les paris sont réglés automatiquement quand un vainqueur est déclaré.
 - **Porte-monnaie** : chaque compte a un solde en ryos (`profiles.balance`) et un registre (`ledger`). Le solde ne bouge que par les triggers de `bets` (mise prélevée à l'insertion, gain versé quand le statut passe à `gagne`, repris si le résultat est annulé, mise rendue si un pari en cours est supprimé) et par la fonction `adjust_ryos` (crédit/retrait par un orga). Un compte démarre à 0.
 - Les joueurs connectés parient eux-mêmes (un seul camp par combat) et peuvent annuler tant que les paris du combat sont ouverts. Les orgas gèrent équipes, cotes, résultats, et peuvent parier pour le compte d'un joueur. Le public lit tout sans compte.
-- Connexion par **nom d'utilisateur + mot de passe**, sans e-mail : le site fabrique un e-mail invisible `pseudo@korin-suna.app`. Un trigger crée la ligne `profiles`. Les droits d'orga se donnent dans la table `admins` (section « Comptes et ryos » de l'onglet Orga).
+- Connexion par **nom RP (prénom + nom, ex. « Ryuta Chiiketsu ») + mot de passe**, sans e-mail : le site fabrique un e-mail invisible à partir du nom sans accents ni majuscules (`ryuta.chiiketsu@korin-suna.app`), donc « Ryūta chiiketsu » ouvre le même compte. Le nom tel qu'écrit à l'inscription est affiché (`profiles.username`). Un trigger crée la ligne `profiles`. Les droits d'orga se donnent dans la table `admins` (section « Comptes et ryos » de l'onglet Orga).
 - En mode démo, pas de comptes : l'orga saisit le nom du parieur à la main, sans solde.
 - Thème : sombre noir et bordeaux, doré, kanjis rouges. La propriétaire a demandé de **ne pas** remettre l'affiche du Korin sur le site.
 
 ## Reste à faire
 1. ~~Clé publique dans `CONFIG`~~ : fait (`sb_publishable_…`). Ne jamais utiliser la clé `service_role` ni la clé secrète.
-2. Lancer `schema.sql` dans le SQL Editor de Supabase.
-3. Dans Supabase → Authentication → Sign In / Providers → Email, désactiver « Confirm email ».
-4. La propriétaire crée son compte sur le site (Compte → Créer un compte), puis lance dans le SQL Editor :
-   `insert into public.admins (user_id) select user_id from public.profiles where username = 'son_pseudo';`
+2. ~~`schema.sql` lancé, « Confirm email » désactivé~~ : fait. À relancer après chaque modification de `schema.sql`.
+3. La propriétaire crée son compte sur le site (Connexion → Créer un compte), puis lance dans le SQL Editor :
+   `insert into public.admins (user_id) select user_id from public.profiles where lower(username) = lower('Son Nom');`

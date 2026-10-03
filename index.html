@@ -284,14 +284,18 @@ const clone = o => JSON.parse(JSON.stringify(o));
 const fail = msg => { throw new Error(msg); };
 const plural = (n, s, p) => n + " " + (n > 1 ? (p || s + "s") : s);
 
-/* Connexion par nom d'utilisateur : Supabase exige un e-mail, on en fabrique un invisible à partir du pseudo. */
+/* Connexion par nom RP (ex. « Ryuta Chiiketsu ») : Supabase exige un e-mail, on en fabrique un invisible
+   à partir du nom sans accents ni majuscules (ryuta.chiiketsu@korin-suna.app). « Ryūta chiiketsu » ouvre donc le même compte. */
 const LOGIN_DOMAIN = "korin-suna.app";
 function cleanUsername(u){
-  u = String(u || "").trim().toLowerCase();
-  if (!/^[a-z0-9_.-]{3,20}$/.test(u)) fail("Le nom d'utilisateur doit faire 3 à 20 caractères : lettres sans accent, chiffres, point, tiret ou tiret bas.");
-  return u;
+  const name = String(u || "").trim().replace(/\s+/g, " ");
+  if (name.length < 3 || name.length > 40 || !/^[\p{L}][\p{L}' .-]*[\p{L}]$/u.test(name))
+    fail("Le nom doit faire 3 à 40 caractères : lettres (accents permis), espaces, apostrophe ou tiret. Ex. : Ryuta Chiiketsu.");
+  const slug = name.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
+  if (slug.length < 2) fail("Écris ton nom en lettres latines (ex. : Ryuta Chiiketsu).");
+  return {name, slug};
 }
-const toEmail = u => u + "@" + LOGIN_DOMAIN;
+const toEmail = u => u.slug + "@" + LOGIN_DOMAIN;
 let authMode = "login";
 let accountList = null;
 
@@ -365,16 +369,16 @@ function supaBackend(){
     async login(username, password){
       const u = cleanUsername(username);
       const {error} = await sb.auth.signInWithPassword({email:toEmail(u), password});
-      if (error) fail("Connexion refusée : nom d'utilisateur ou mot de passe incorrect.");
+      if (error) fail("Connexion refusée : nom ou mot de passe incorrect.");
       await this.checkAdmin();
     },
     async signup(username, password, password2){
       const u = cleanUsername(username);
       if ((password || "").length < 6) fail("Le mot de passe doit faire au moins 6 caractères.");
       if (password !== password2) fail("Les deux mots de passe ne sont pas identiques.");
-      const {data, error} = await sb.auth.signUp({email:toEmail(u), password, options:{data:{username:u}}});
+      const {data, error} = await sb.auth.signUp({email:toEmail(u), password, options:{data:{username:u.name}}});
       if (error){
-        if (/already|registered|exists/i.test(error.message)) fail("Ce nom d'utilisateur est déjà pris.");
+        if (/already|registered|exists/i.test(error.message)) fail("Ce nom est déjà pris.");
         fail("Inscription refusée : " + error.message);
       }
       if (!data.session) fail("Compte créé, mais Supabase demande encore une confirmation par e-mail. Désactive « Confirm email » dans Authentication → Sign In / Providers → Email.");
@@ -908,11 +912,11 @@ function authForm(){
       <button class="btn ${su ? "ghost" : ""} sm" data-act="auth-mode" data-mode="login" aria-pressed="${!su}">Se connecter</button>
       <button class="btn ${su ? "" : "ghost"} sm" data-act="auth-mode" data-mode="signup" aria-pressed="${su}">Créer un compte</button></div>
     <form class="form" id="auth-form" data-form="${su ? "signup" : "login"}" style="max-width:${su ? 860 : 640}px">
-    <label class="f"><span class="eyebrow">Nom d'utilisateur</span><input id="lg-user" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="20" required></label>
+    <label class="f"><span class="eyebrow">Prénom et nom RP</span><input id="lg-user" autocomplete="username" autocapitalize="words" spellcheck="false" maxlength="40" placeholder="Ex. Ryuta Chiiketsu" required></label>
     <label class="f"><span class="eyebrow">Mot de passe</span><input id="lg-pw" type="password" autocomplete="${su ? "new-password" : "current-password"}" required></label>
     ${su ? `<label class="f"><span class="eyebrow">Confirmer le mot de passe</span><input id="lg-pw2" type="password" autocomplete="new-password" required></label>` : ""}
     <button class="btn" type="submit">${su ? "Créer le compte" : "Se connecter"}</button></form>
-    <p class="hint">${su ? "3 à 20 caractères : lettres sans accent, chiffres, point, tiret ou tiret bas. Pas besoin d'e-mail. Ton compte démarre à 0 ryo : la famille Chiiketsu crédite ton solde."
+    <p class="hint">${su ? "Ton prénom et ton nom de personnage, ex. Ryuta Chiiketsu (accents permis). Pas besoin d'e-mail. Ton compte démarre à 0 ryo : la famille Chiiketsu crédite ton solde."
       : "Pas besoin de compte pour suivre le tournoi, seulement pour parier."}</p>`;
 }
 
