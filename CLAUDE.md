@@ -11,16 +11,18 @@ Site du **Korin de Suna**, tournoi de 2 contre 2 avec paris en ryos, pour une co
 
 ## Fonctionnement
 - `CONFIG` en haut du script : `SUPABASE_URL` et `SUPABASE_ANON_KEY`. Si la clé est vide, le site passe en **mode démo** (données d'exemple dans le navigateur).
-- Pages (onglets) : Accueil, Tableau, Équipes, Paris, Classement, Historique, Orga.
+- Pages (onglets) : Accueil, Tableau, Équipes, Paris, Classement, Historique, Orga (visible seulement pour les orgas), Compte (connexion / solde).
 - Format : élimination directe, nombre d'équipes variable, exemptions réparties dans le tableau.
 - Paris : cotes fixées par les orgas pour chaque combat, cote gelée au moment du pari, gain = mise × cote. Les paris sont réglés automatiquement quand un vainqueur est déclaré.
-- Seuls les organisateurs écrivent : inscription des équipes, paris, cotes, résultats. Le public lit tout sans compte.
-- Connexion par **nom d'utilisateur + mot de passe**, sans e-mail : le site fabrique un e-mail invisible `pseudo@korin-suna.app`. Un trigger crée la ligne `profiles`. Un nouveau compte n'a aucun droit tant qu'un orga ne l'a pas validé (table `admins`, section « Comptes organisateurs » de l'onglet Orga).
+- **Porte-monnaie** : chaque compte a un solde en ryos (`profiles.balance`) et un registre (`ledger`). Le solde ne bouge que par les triggers de `bets` (mise prélevée à l'insertion, gain versé quand le statut passe à `gagne`, repris si le résultat est annulé, mise rendue si un pari en cours est supprimé) et par la fonction `adjust_ryos` (crédit/retrait par un orga). Un compte démarre à 0.
+- Les joueurs connectés parient eux-mêmes (un seul camp par combat) et peuvent annuler tant que les paris du combat sont ouverts. Les orgas gèrent équipes, cotes, résultats, et peuvent parier pour le compte d'un joueur. Le public lit tout sans compte.
+- Connexion par **nom d'utilisateur + mot de passe**, sans e-mail : le site fabrique un e-mail invisible `pseudo@korin-suna.app`. Un trigger crée la ligne `profiles`. Les droits d'orga se donnent dans la table `admins` (section « Comptes et ryos » de l'onglet Orga).
+- En mode démo, pas de comptes : l'orga saisit le nom du parieur à la main, sans solde.
 - Thème : sombre noir et bordeaux, doré, kanjis rouges. La propriétaire a demandé de **ne pas** remettre l'affiche du Korin sur le site.
 
 ## Reste à faire
-1. Récupérer la clé **anon public** (ou `sb_publishable_…`) dans Supabase → Project Settings → API Keys, puis la mettre dans `CONFIG`. Ne jamais utiliser la clé `service_role` ni la clé secrète.
+1. ~~Clé publique dans `CONFIG`~~ : fait (`sb_publishable_…`). Ne jamais utiliser la clé `service_role` ni la clé secrète.
 2. Lancer `schema.sql` dans le SQL Editor de Supabase.
 3. Dans Supabase → Authentication → Sign In / Providers → Email, désactiver « Confirm email ».
-4. La propriétaire crée son compte sur le site (Orga → Créer un compte), puis lance dans le SQL Editor :
+4. La propriétaire crée son compte sur le site (Compte → Créer un compte), puis lance dans le SQL Editor :
    `insert into public.admins (user_id) select user_id from public.profiles where username = 'son_pseudo';`

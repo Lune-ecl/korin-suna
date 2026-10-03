@@ -43,13 +43,20 @@ button,input,select{font:inherit;color:inherit}
 .tab:hover{color:var(--sand)}
 .tab[aria-current="page"]{color:var(--gold);border-bottom-color:var(--gold)}
 .tab-orga{margin-left:auto}
+.tab-orga[hidden]+.tab-compte{margin-left:auto}
+.tab-compte{color:var(--gold)}
 @media (max-width:760px){
   .top .wrap{flex-wrap:wrap;gap:0}
   .brand{padding-top:10px}
   .tabs{flex-basis:100%}
   .tab{padding:13px 10px 12px}
-  .tab-orga{margin-left:0}
+  .tab-orga,.tab-orga[hidden]+.tab-compte{margin-left:0}
 }
+.wallet{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 24px}
+.wallet .v{font:700 clamp(2rem,5vw,2.8rem)/1 var(--f-title);color:var(--gold);font-variant-numeric:tabular-nums}
+.wallet .v small{font:500 18px var(--f-kanji);color:var(--blood);margin-left:6px}
+.adj{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.adj input{width:96px;padding:7px 8px}
 .notice{border-bottom:1px solid var(--line-soft);background:rgba(110,20,24,.28);color:var(--sand);font-size:13.5px}
 .notice .wrap{padding-block:8px}
 .notice b{color:var(--gold);font-weight:600}
@@ -238,7 +245,8 @@ footer .wrap{padding-block:18px;display:flex;justify-content:space-between;gap:1
       <button class="tab" data-tab="paris">Paris</button>
       <button class="tab" data-tab="classement">Classement</button>
       <button class="tab" data-tab="historique">Historique</button>
-      <button class="tab tab-orga" data-tab="orga">Orga</button>
+      <button class="tab tab-orga" data-tab="orga" id="tab-orga">Orga</button>
+      <button class="tab tab-compte" data-tab="compte" id="tab-compte">Connexion</button>
     </nav>
   </div>
 </header>
@@ -260,7 +268,7 @@ footer .wrap{padding-block:18px;display:flex;justify-content:space-between;gap:1
    ============================================================ */
 const CONFIG = {
   SUPABASE_URL: "https://jidpdwngoazxcdgpmwyc.supabase.co",
-  SUPABASE_ANON_KEY: ""
+  SUPABASE_ANON_KEY: "sb_publishable_qi7xIh_WcJ4TaRdla2ybVA_XYaKrbC7"
 };
 
 /* ---------- Outils ---------- */
@@ -329,8 +337,19 @@ function supaBackend(){
         sb.from("bets").select("*").order("created_at", {ascending:false})
       ]);
       [t, m, b].forEach(chk);
-      return {teams:t.data, matches:m.data, bets:b.data};
+      let me = null, ledger = [];
+      if (this.user){
+        const [p, l] = await Promise.all([
+          sb.from("profiles").select("username, balance").eq("user_id", this.user.id).maybeSingle(),
+          sb.from("ledger").select("*").eq("user_id", this.user.id).order("created_at", {ascending:false}).limit(100)
+        ]);
+        [p, l].forEach(chk);
+        me = p.data ? {username:p.data.username, balance:Number(p.data.balance)} : null;
+        ledger = l.data;
+      }
+      return {teams:t.data, matches:m.data, bets:b.data, me, ledger};
     },
+    async adjust(userId, delta){ chk(await sb.rpc("adjust_ryos", {p_user:userId, p_delta:delta, p_reason:null})); },
     async insert(table, rows){ chk(await sb.from(table).insert(rows)); },
     async update(table, id, patch){ chk(await sb.from(table).update(patch).eq("id", id)); },
     async remove(table, id){ chk(await sb.from(table).delete().eq("id", id)); },
@@ -363,12 +382,12 @@ function supaBackend(){
     },
     async accounts(){
       const [p, a] = await Promise.all([
-        sb.from("profiles").select("user_id, username, created_at").order("created_at"),
+        sb.from("profiles").select("user_id, username, created_at, balance").order("username"),
         sb.from("admins").select("user_id")
       ]);
       [p, a].forEach(chk);
       const orgas = new Set(a.data.map(x => x.user_id));
-      return p.data.map(x => ({...x, orga:orgas.has(x.user_id)}));
+      return p.data.map(x => ({...x, balance:Number(x.balance), orga:orgas.has(x.user_id)}));
     },
     async setOrga(userId, on){
       if (userId === this.user.id && !on) fail("Tu ne peux pas retirer tes propres droits.");
@@ -385,7 +404,11 @@ function supaBackend(){
   };
 }
 
-async function reload(){ S = await backend.load(); S.matches.forEach(m => { m.odds_a = Number(m.odds_a); m.odds_b = Number(m.odds_b); }); S.bets.forEach(b => { b.odds = Number(b.odds); b.amount = Number(b.amount); b.payout = Number(b.payout); }); }
+async function reload(){
+  S = await backend.load();
+  S.me = S.me || null; S.ledger = S.ledger || [];
+  if (backend.mode === "live" && backend.isAdmin){ try { accountList = await backend.accounts(); } catch(e){} }
+  S.matches.forEach(m => { m.odds_a = Number(m.odds_a); m.odds_b = Number(m.odds_b); }); S.bets.forEach(b => { b.odds = Number(b.odds); b.amount = Number(b.amount); b.payout = Number(b.payout); }); }
 
 /* ---------- Lecture des données ---------- */
 const teamById = id => S.teams.find(t => t.id === id);
@@ -531,24 +554,49 @@ async function undoResult(id){
   await reload();
 }
 
-async function addBet({bettor, matchId, teamId, amount}){
-  bettor = (bettor || "").trim();
+/* En ligne, chaque pari est lié à un compte : la base prélève la mise et versera le gain.
+   En mode démo, l'orga saisit simplement un nom. */
+async function addBet({bettor, userId, matchId, teamId, amount}){
   amount = Math.round(Number(amount));
-  if (!bettor) fail("Indique le nom du parieur.");
   const m = matchById(matchId);
   if (!m) fail("Choisis un combat.");
   if (m.status !== "ouvert") fail("Les paris sont fermés pour ce combat.");
   if (teamId !== m.team_a && teamId !== m.team_b) fail("Choisis l'équipe sur laquelle parier.");
   if (!(amount > 0)) fail("La mise doit être d'au moins 1 ryo.");
+  if (backend.mode === "live"){
+    if (!backend.user) fail("Connecte-toi pour parier.");
+    if (!userId || !isAdmin()) userId = backend.user.id;
+    const acct = userId === backend.user.id ? S.me : (accountList || []).find(a => a.user_id === userId);
+    if (!acct) fail("Compte introuvable.");
+    if (acct.balance < amount) fail(`Solde insuffisant : ${fmt(acct.balance)} ryos disponibles.`);
+    bettor = acct.username;
+  } else {
+    bettor = (bettor || "").trim();
+    if (!bettor) fail("Indique le nom du parieur.");
+    userId = null;
+  }
   const odds = teamId === m.team_a ? m.odds_a : m.odds_b;
-  await backend.insert("bets", [{id:uid(), bettor, match_id:matchId, team_id:teamId, amount, odds, status:"en_cours", payout:0, created_at:now()}]);
+  const row = {id:uid(), bettor, match_id:matchId, team_id:teamId, amount, odds, status:"en_cours", payout:0, created_at:now()};
+  if (userId) row.user_id = userId;
+  await backend.insert("bets", [row]);
   await reload();
 }
+
+const isMine = b => !!(backend && backend.user && b.user_id === backend.user.id);
+const canCancel = b => b.status === "en_cours" && (isAdmin() || (isMine(b) && (matchById(b.match_id) || {}).status === "ouvert"));
 
 async function deleteBet(id){
   const b = S.bets.find(x => x.id === id); if (!b) fail("Pari introuvable.");
   if (b.status !== "en_cours") fail("Un pari déjà réglé ne peut plus être retiré.");
+  if (!canCancel(b)) fail("Les paris sont fermés : ce pari ne peut plus être annulé.");
   await backend.remove("bets", id);
+  await reload();
+}
+
+async function adjustBalance(userId, value, sign){
+  const n = Math.round(Number(String(value || "").replace(/\s/g, "")));
+  if (!(n > 0)) fail("Indique un nombre de ryos positif.");
+  await backend.adjust(userId, sign * n);
   await reload();
 }
 
@@ -653,7 +701,7 @@ function vAccueil(){
 
   <section class="sec">
     <div class="sec-head"><div><h2><span class="k">賭</span>Combats ouverts aux paris</h2>
-      <p class="sub">Les paris s'enregistrent auprès de la famille Chiiketsu. Gain = mise × cote du moment.</p></div>
+      <p class="sub">${backend.mode === "live" ? "Connecte-toi pour parier tes ryos directement sur le site." : "Les paris s'enregistrent auprès de la famille Chiiketsu."} Gain = mise × cote du moment.</p></div>
       <button class="btn ghost" data-tab="paris">Tous les paris</button></div>
     ${open.length ? `<div class="duels">${open.map(duel).join("")}</div>` : emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}
   </section>
@@ -748,7 +796,7 @@ function betRows(list, withDelete){
       <td class="num">${fmt(b.amount)}</td>
       <td class="num">${fOdds(b.odds)}</td>
       <td class="num">${res}</td>
-      ${withDelete ? `<td class="num">${b.status === "en_cours" ? `<button class="btn danger sm" data-act="del-bet" data-id="${b.id}" data-confirm="Retirer ?">Retirer</button>` : ""}</td>` : ""}
+      ${withDelete ? `<td class="num">${canCancel(b) ? `<button class="btn danger sm" data-act="del-bet" data-id="${b.id}" data-confirm="Confirmer">Annuler</button>` : ""}</td>` : ""}
     </tr>`;
   }).join("");
 }
@@ -758,22 +806,38 @@ function vParis(){
   const open = S.matches.filter(m => m.status === "ouvert");
   const closed = S.matches.filter(m => m.status === "ferme");
   const pend = S.bets.filter(b => b.status === "en_cours");
+  const live = backend.mode === "live";
   const names = [...new Set(S.bets.map(b => b.bettor.trim()))].sort((a, b) => a.localeCompare(b, "fr"));
-  const form = !admin ? "" : open.length ? `
-    <section class="sec"><div class="sec-head"><h2>Enregistrer un pari</h2></div>
-    <form class="form" id="bet-form" data-form="bet">
-      <label class="f"><span class="eyebrow">Parieur</span><input id="bf-who" list="bf-names" maxlength="60" required>
-        <datalist id="bf-names">${names.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist></label>
+  const who = !live
+    ? `<label class="f"><span class="eyebrow">Parieur</span><input id="bf-who" list="bf-names" maxlength="60" required>
+        <datalist id="bf-names">${names.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist></label>`
+    : admin && accountList && accountList.length > 1
+    ? `<label class="f"><span class="eyebrow">Pour le compte de</span><select id="bf-user">${accountList.map(a =>
+        `<option value="${a.user_id}"${a.user_id === backend.user.id ? " selected" : ""}>${esc(a.username)} · ${fmt(a.balance)} 両</option>`).join("")}</select></label>`
+    : "";
+  const betForm = `<form class="form" id="bet-form" data-form="bet">
+      ${who}
       <label class="f"><span class="eyebrow">Combat</span><select id="bet-match">${open.map(m => `<option value="${m.id}">${esc(roundName(m.round))} · ${esc(vsLabel(m))}</option>`).join("")}</select></label>
       <label class="f"><span class="eyebrow">Équipe choisie</span><select id="bet-team"></select></label>
       <label class="f"><span class="eyebrow">Mise (ryos)</span><input id="bf-amount" type="number" min="1" step="1" inputmode="numeric" required></label>
       <p class="gain full" id="bet-gain">Gain possible : <b>—</b></p>
-      <button class="btn" type="submit">Enregistrer le pari</button>
-    </form></section>`
-    : `<section class="sec">${emptyBox("賭", "Aucun combat n'est ouvert : ouvre les paris d'un combat depuis l'onglet Orga.")}</section>`;
+      <button class="btn" type="submit">${live ? "Parier" : "Enregistrer le pari"}</button>
+    </form>`;
+  let form;
+  if (!open.length) form = (live && backend.user) || admin ? `<section class="sec">${emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}</section>` : "";
+  else if (live && !backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, puis demande des ryos à la famille Chiiketsu.</p></div>
+      <button class="btn" data-tab="compte">Se connecter</button></div></section>`;
+  else if (live) form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
+      <p class="sub">Ton solde : <b class="pos">${fmt(S.me ? S.me.balance : 0)} ryos</b>. La mise est prélevée tout de suite ; tu peux annuler tant que les paris du combat sont ouverts.</p></div></div>
+      ${betForm}</section>`;
+  else form = admin ? `<section class="sec"><div class="sec-head"><h2>Enregistrer un pari</h2></div>${betForm}</section>` : "";
+  const mine = live && backend.user ? S.bets.filter(b => isMine(b) && b.status === "en_cours") : [];
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">賭</span>Paris</h1>
       <p class="sub">La cote est fixée par les organisateurs et gelée au moment du pari. Si l'équipe choisie gagne, le parieur reçoit sa mise multipliée par la cote.</p></div></div>
     ${form}
+    ${mine.length ? `<section class="sec"><div class="sec-head"><h2>Mes paris en cours · ${mine.length}</h2></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th><th></th></tr></thead>
+      <tbody>${betRows(mine, true)}</tbody></table></div></section>` : ""}
     <section class="sec"><div class="sec-head"><h2>Ouverts aux paris · ${open.length}</h2></div>
       ${open.length ? `<div class="duels">${open.map(duel).join("")}</div>` : emptyBox("賭", "Aucun combat ouvert pour le moment.")}</section>
     ${closed.length ? `<section class="sec"><div class="sec-head"><h2>Paris fermés, combat en attente · ${closed.length}</h2></div><div class="duels">${closed.map(duel).join("")}</div></section>` : ""}
@@ -838,38 +902,71 @@ function vHistorique(){
     </section>`;
 }
 
+function authForm(){
+  const su = authMode === "signup";
+  return `<div class="row" role="tablist" style="margin-bottom:12px">
+      <button class="btn ${su ? "ghost" : ""} sm" data-act="auth-mode" data-mode="login" aria-pressed="${!su}">Se connecter</button>
+      <button class="btn ${su ? "" : "ghost"} sm" data-act="auth-mode" data-mode="signup" aria-pressed="${su}">Créer un compte</button></div>
+    <form class="form" id="auth-form" data-form="${su ? "signup" : "login"}" style="max-width:${su ? 860 : 640}px">
+    <label class="f"><span class="eyebrow">Nom d'utilisateur</span><input id="lg-user" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="20" required></label>
+    <label class="f"><span class="eyebrow">Mot de passe</span><input id="lg-pw" type="password" autocomplete="${su ? "new-password" : "current-password"}" required></label>
+    ${su ? `<label class="f"><span class="eyebrow">Confirmer le mot de passe</span><input id="lg-pw2" type="password" autocomplete="new-password" required></label>` : ""}
+    <button class="btn" type="submit">${su ? "Créer le compte" : "Se connecter"}</button></form>
+    <p class="hint">${su ? "3 à 20 caractères : lettres sans accent, chiffres, point, tiret ou tiret bas. Pas besoin d'e-mail. Ton compte démarre à 0 ryo : la famille Chiiketsu crédite ton solde."
+      : "Pas besoin de compte pour suivre le tournoi, seulement pour parier."}</p>`;
+}
+
+function vCompte(){
+  const head = (sub) => `<div class="sec-head"><div><h1 class="pt"><span class="k">印</span>Mon compte</h1><p class="sub">${sub}</p></div></div>`;
+  if (backend.mode !== "live") return head("Connexion et porte-monnaie de ryos.") +
+    emptyBox("印", "La connexion fonctionne une fois Supabase branché. En mode démo, les paris se saisissent depuis l'onglet Paris.");
+  if (!backend.user) return head("Connecte-toi pour parier tes ryos sur les combats.") + authForm();
+  const me = S.me || {username:backend.username, balance:0};
+  const mine = S.bets.filter(isMine);
+  const dt = s => new Date(s).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
+  return head("Ton solde, tes paris et tous les mouvements de ryos.") + `
+    <div class="panel wallet">
+      <div><div class="eyebrow">Solde de ${esc(me.username)}${backend.isAdmin ? " · organisateur" : ""}</div><div class="v">${fmt(me.balance)}<small>両</small></div></div>
+      <div class="row"><button class="btn" data-tab="paris">Parier</button><button class="btn ghost" data-act="logout">Se déconnecter</button></div>
+    </div>
+    <p class="hint">Pour recevoir des ryos, adresse-toi à la famille Chiiketsu. Les gains sont versés automatiquement dès que le vainqueur d'un combat est déclaré.</p>
+    <section class="sec"><div class="sec-head"><h2>Mes paris · ${mine.length}</h2></div>
+    ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Résultat</th><th></th></tr></thead>
+      <tbody>${betRows(mine, true)}</tbody></table></div>` : emptyBox("賭", "Tu n'as encore placé aucun pari.")}
+    </section>
+    <section class="sec"><div class="sec-head"><h2>Mouvements de ryos</h2></div>
+    ${S.ledger.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Motif</th><th class="num">Montant</th><th class="num">Solde</th></tr></thead><tbody>
+      ${S.ledger.map(l => `<tr><td class="mut">${dt(l.created_at)}</td><td>${esc(l.reason)}</td>
+        <td class="num ${l.delta > 0 ? "pos" : "neg"}">${l.delta > 0 ? "+" : "−"}${fmt(Math.abs(l.delta))}</td><td class="num">${fmt(l.balance_after)}</td></tr>`).join("")}
+    </tbody></table></div>` : emptyBox("両", "Aucun mouvement pour l'instant.")}
+    </section>`;
+}
+
 function vOrga(){
   const head = `<div class="sec-head"><div><h1 class="pt"><span class="k">契</span>Espace organisateurs</h1>
-    <p class="sub">Réservé à la famille Chiiketsu : tirage du tableau, cotes, ouverture des paris et résultats.</p></div></div>`;
+    <p class="sub">Réservé à la famille Chiiketsu : tirage du tableau, cotes, ouverture des paris, résultats et ryos des joueurs.</p></div></div>`;
   if (backend.mode === "live" && !backend.user){
-    const su = authMode === "signup";
-    return head + `<div class="row" role="tablist" style="margin-bottom:12px">
-        <button class="btn ${su ? "ghost" : ""} sm" data-act="auth-mode" data-mode="login" aria-pressed="${!su}">Se connecter</button>
-        <button class="btn ${su ? "" : "ghost"} sm" data-act="auth-mode" data-mode="signup" aria-pressed="${su}">Créer un compte</button></div>
-      <form class="form" id="auth-form" data-form="${su ? "signup" : "login"}" style="max-width:${su ? 860 : 640}px">
-      <label class="f"><span class="eyebrow">Nom d'utilisateur</span><input id="lg-user" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="20" required></label>
-      <label class="f"><span class="eyebrow">Mot de passe</span><input id="lg-pw" type="password" autocomplete="${su ? "new-password" : "current-password"}" required></label>
-      ${su ? `<label class="f"><span class="eyebrow">Confirmer le mot de passe</span><input id="lg-pw2" type="password" autocomplete="new-password" required></label>` : ""}
-      <button class="btn" type="submit">${su ? "Créer le compte" : "Se connecter"}</button></form>
-      <p class="hint">${su ? "3 à 20 caractères : lettres sans accent, chiffres, point, tiret ou tiret bas. Un nouveau compte doit être validé par un organisateur avant de pouvoir gérer le tournoi."
-        : "Le public n'a pas besoin de compte pour suivre le tournoi."}</p>`;
+    return head + `<div class="panel"><p>Connecte-toi avec ton compte d'organisateur.</p><button class="btn" data-tab="compte">Se connecter</button></div>`;
   }
   if (backend.mode === "live" && !backend.isAdmin){
-    return head + `<div class="panel"><p>Connecté en tant que <b>${esc(backend.username)}</b>. Ton compte n'a pas encore les droits d'organisateur : demande à un membre de la famille Chiiketsu de te valider.</p>
-      <button class="btn ghost" data-act="logout">Se déconnecter</button></div>`;
+    return head + `<div class="panel"><p>Connecté en tant que <b>${esc(backend.username)}</b>. Ton compte n'a pas les droits d'organisateur : demande à un membre de la famille Chiiketsu de te les donner.</p></div>`;
   }
   const n = S.teams.length;
   let size = 1; while (size < n) size *= 2;
   const drawn = S.matches.length > 0;
-  const acct = backend.mode === "live" ? `<p class="hint">Connecté : <b>${esc(backend.username)}</b> · <button class="btn ghost sm" data-act="logout">Se déconnecter</button></p>` : "";
+  const acct = "";
 
-  const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes organisateurs</h2>
-      <p class="sub">Les nouveaux comptes apparaissent ici. Donne les droits uniquement aux membres de confiance.</p></div>
+  const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes et ryos</h2>
+      <p class="sub">Tous les comptes du site. Crédite les ryos des joueurs ici (ex. après un dépôt en RP). Donne les droits d'organisateur uniquement aux membres de confiance.</p></div>
       <button class="btn ghost sm" data-act="load-accounts">Actualiser</button></div>
     ${accountList === null ? emptyBox("契", "Clique sur « Actualiser » pour afficher les comptes.")
-      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom d'utilisateur</th><th>Créé le</th><th>Rôle</th><th></th></tr></thead><tbody>
+      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom d'utilisateur</th><th>Créé le</th><th class="num">Solde</th><th class="num">Créditer / retirer</th><th>Rôle</th><th></th></tr></thead><tbody>
         ${accountList.map(a => `<tr><td class="who">${esc(a.username)}</td><td class="mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
-          <td>${a.orga ? '<span class="pill p-open">Organisateur</span>' : '<span class="pill p-wait">En attente</span>'}</td>
+          <td class="num"><b class="pos">${fmt(a.balance)}</b> 両</td>
+          <td><div class="adj"><input id="adj-${a.user_id}" type="number" min="1" step="1" inputmode="numeric" placeholder="Ryos" aria-label="Montant pour ${esc(a.username)}">
+            <button class="btn sm" data-act="adj" data-id="${a.user_id}" data-sign="1">+ Créditer</button>
+            <button class="btn ghost sm" data-act="adj" data-id="${a.user_id}" data-sign="-1">− Retirer</button></div></td>
+          <td>${a.orga ? '<span class="pill p-open">Organisateur</span>' : '<span class="pill p-wait">Joueur</span>'}</td>
           <td class="num">${a.user_id === backend.user.id ? '<span class="mut">Toi</span>' : a.orga
             ? `<button class="btn danger sm" data-act="orga" data-id="${a.user_id}" data-on="0" data-confirm="Confirmer">Retirer les droits</button>`
             : `<button class="btn sm" data-act="orga" data-id="${a.user_id}" data-on="1" data-confirm="Confirmer">Rendre organisateur</button>`}</td></tr>`).join("")}
@@ -890,12 +987,12 @@ function vOrga(){
   return head + acct + `
     <section class="sec"><div class="sec-head"><div><h2>Tirage du tableau</h2>
       <p class="sub">${plural(n, "équipe inscrite", "équipes inscrites")}${n >= 2 ? ` · tableau de ${size}${size - n ? `, ${plural(size - n, "exemption")} au premier tour` : ""}` : ""}. Les équipes s'inscrivent dans l'onglet Équipes.</p></div></div>
-      <div class="panel"><p>${drawn ? "Le tableau est déjà tiré. Le retirer efface tous les combats <b>et tous les paris</b>." : "Le tirage place les équipes au hasard et ouvre les paris des premiers combats avec une cote de ×2,00 par défaut."}</p>
+      <div class="panel"><p>${drawn ? "Le tableau est déjà tiré. Le retirer efface tous les combats <b>et tous les paris</b> (les mises non réglées sont rendues)." : "Le tirage place les équipes au hasard et ouvre les paris des premiers combats avec une cote de ×2,00 par défaut."}</p>
       <button class="btn${drawn ? " danger" : ""}" data-act="draw" data-confirm="${drawn ? "Confirmer : tout effacer et retirer" : "Confirmer le tirage"}" ${n < 2 ? "disabled" : ""}>${drawn ? "Retirer le tableau" : "Tirer au sort le tableau"}</button></div>
     </section>
     ${manage}
     <section class="sec"><div class="sec-head"><h2>Zone sensible</h2></div>
-      <div class="panel danger-zone"><p>Réinitialiser efface les équipes, les combats et les paris. Action définitive.</p>
+      <div class="panel danger-zone"><p>Réinitialiser efface les équipes, les combats et les paris. Les mises non réglées sont rendues, les soldes des joueurs sont conservés. Action définitive.</p>
       <div class="row"><button class="btn danger" data-act="reset" data-confirm="Confirmer : tout effacer">Réinitialiser le tournoi</button>
       ${backend.mode === "demo" ? `<button class="btn ghost" data-act="reseed" data-confirm="Confirmer">Recharger les données d'exemple</button>` : ""}</div></div>
     </section>
@@ -925,7 +1022,7 @@ function mrow(m){
 }
 
 /* ---------- Rendu ---------- */
-const VIEWS = {accueil:vAccueil, tableau:vTableau, equipes:vEquipes, paris:vParis, classement:vClassement, historique:vHistorique, orga:vOrga};
+const VIEWS = {accueil:vAccueil, tableau:vTableau, equipes:vEquipes, paris:vParis, classement:vClassement, historique:vHistorique, orga:vOrga, compte:vCompte};
 let tab = (location.hash || "").slice(1);
 if (!VIEWS[tab]) tab = "accueil";
 
@@ -967,6 +1064,9 @@ function render(resetForm){
   view.innerHTML = VIEWS[tab]();
   if (!resetForm) restore(s);
   syncBetForm(resetForm ? null : s.o["bet-team"]);
+  const live = backend.mode === "live";
+  $("tab-orga").hidden = live && !backend.isAdmin;
+  $("tab-compte").textContent = !live ? "Compte" : backend.user ? (S.me ? fmt(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
   document.querySelectorAll(".tab").forEach(b => { if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
 }
 
@@ -1000,10 +1100,12 @@ const ACTIONS = {
   "status": b => run(() => setStatus(b.dataset.id, b.dataset.st), b.dataset.st === "ouvert" ? "Paris rouverts." : "Paris fermés."),
   "win": b => run(() => declareWinner(b.dataset.id, b.dataset.team), "Vainqueur déclaré, paris réglés."),
   "undo": b => run(() => undoResult(b.dataset.id), "Résultat annulé."),
-  "del-bet": b => run(() => deleteBet(b.dataset.id), "Pari retiré."),
+  "del-bet": b => run(() => deleteBet(b.dataset.id), backend.mode === "live" ? "Pari annulé, mise rendue." : "Pari retiré."),
+  "adj": b => run(() => adjustBalance(b.dataset.id, ($("adj-" + b.dataset.id) || {}).value, Number(b.dataset.sign)),
+    b.dataset.sign === "1" ? "Ryos crédités." : "Ryos retirés.", true),
   "reset": () => run(resetAll, "Tournoi réinitialisé."),
   "reseed": () => run(async () => { await backend.wipe(); await reload(); }, "Données d'exemple rechargées."),
-  "logout": () => run(async () => { await backend.logout(); accountList = null; }, "Déconnecté."),
+  "logout": () => run(async () => { await backend.logout(); accountList = null; await reload(); }, "Déconnecté."),
   "auth-mode": b => { authMode = b.dataset.mode; render(true); },
   "load-accounts": () => run(async () => { accountList = await backend.accounts(); }),
   "orga": b => run(async () => { await backend.setOrga(b.dataset.id, b.dataset.on === "1"); accountList = await backend.accounts(); },
@@ -1030,9 +1132,9 @@ document.addEventListener("submit", e => {
   e.preventDefault();
   const k = f.dataset.form;
   if (k === "team") run(() => addTeam({name:$("tf-name").value, p1:$("tf-p1").value, p2:$("tf-p2").value}), "Équipe inscrite.", true);
-  if (k === "bet") run(() => addBet({bettor:$("bf-who").value, matchId:$("bet-match").value, teamId:$("bet-team").value, amount:$("bf-amount").value}), "Pari enregistré.", true);
-  if (k === "login") run(async () => { await backend.login($("lg-user").value, $("lg-pw").value); if (backend.isAdmin) accountList = await backend.accounts(); }, "Connecté.", true);
-  if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value); authMode = "login"; }, "Compte créé.", true);
+  if (k === "bet") run(() => addBet({bettor:($("bf-who") || {}).value, userId:($("bf-user") || {}).value, matchId:$("bet-match").value, teamId:$("bet-team").value, amount:$("bf-amount").value}), "Pari enregistré.", true);
+  if (k === "login") run(async () => { await backend.login($("lg-user").value, $("lg-pw").value); await reload(); }, "Connecté.", true);
+  if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value); authMode = "login"; await reload(); }, "Compte créé. Bienvenue !", true);
 });
 
 document.addEventListener("change", e => { if (e.target.id === "bet-match") syncBetForm(); if (e.target.id === "bet-team") updateGain(); });
@@ -1048,8 +1150,15 @@ async function init(){
   const notice = (html) => { $("notice-text").innerHTML = html; $("notice").hidden = false; };
   if (wantsLive && window.supabase){
     backend = supaBackend();
-    try { await backend.checkAdmin(); if (backend.isAdmin) accountList = await backend.accounts(); } catch(e){}
-    backend.sb.auth.onAuthStateChange(async () => { try { await backend.checkAdmin(); } catch(e){} render(false); });
+    try { await backend.checkAdmin(); } catch(e){}
+    /* Rappel Supabase : ne pas appeler l'API directement dans ce callback, on diffère. */
+    let lastUser = backend.user ? backend.user.id : null;
+    backend.sb.auth.onAuthStateChange((ev, session) => {
+      const u = session && session.user ? session.user.id : null;
+      if (u === lastUser) return;
+      lastUser = u;
+      setTimeout(async () => { try { await backend.checkAdmin(); await reload(); } catch(e){} render(false); }, 0);
+    });
     backend.subscribe(async () => { try { await reload(); render(false); } catch(e){} });
   } else {
     backend = demoBackend();
