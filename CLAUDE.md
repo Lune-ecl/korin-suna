@@ -11,7 +11,8 @@ Site du **Korin de Suna**, tournoi de 2 contre 2 avec paris en ryos, pour une co
 
 ## Fonctionnement
 - `CONFIG` en haut du script : `SUPABASE_URL` et `SUPABASE_ANON_KEY`. Si la clé est vide, le site passe en **mode démo** (données d'exemple dans le navigateur).
-- Pages (onglets) : Accueil, Tableau, Équipes, Paris, Classement, Historique, Orga, Compte (connexion / solde). **Le public et les joueurs ne voient que Tableau, Équipes, Paris, Classement et Compte** (demande de la propriétaire) ; Accueil, Historique et Orga sont réservés aux orgas (`ORGA_ONLY` dans `index.html`, simple masquage d'interface).
+- Onglets publics : Tableau, Équipes, Paris, Classement, Compte (connexion / solde). **Ils sont identiques pour tout le monde, gérants compris** : aucun bouton ni donnée réservés dedans (demande de la propriétaire).
+- **Tout ce qui est réservé est dans l'onglet Gérance** (`vOrga`, clé `orga`, caché aux non-gérants), en sous-onglets (`GTABS` / `gTab`) : Aperçu (`gApercu`), Combats (tirage, cotes, résultats, réinitialisation), Équipes (`gEquipes`, inscription/retrait), Paris (`gParis`, tous les paris + parier pour un joueur), Historique (`vHistorique`), Comptes et ryos, Blacklist. Ne pas remettre d'éléments de gérance dans les onglets publics.
 - Format : élimination directe, nombre d'équipes variable, exemptions réparties dans le tableau.
 - Paris : cotes fixées par les orgas pour chaque combat, cote gelée au moment du pari, gain = mise × cote. Les paris sont réglés automatiquement quand un vainqueur est déclaré.
 - **Porte-monnaie** : chaque compte a un solde en ryos (`profiles.balance`) et un registre (`ledger`). Le solde ne bouge que par les triggers de `bets` (mise prélevée à l'insertion, gain versé quand le statut passe à `gagne`, repris si le résultat est annulé, mise rendue si un pari en cours est supprimé) et par la fonction `adjust_ryos` (crédit/retrait par un orga). Un compte démarre à 0.

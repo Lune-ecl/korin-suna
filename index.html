@@ -238,13 +238,12 @@ footer .wrap{padding-block:18px;display:flex;justify-content:space-between;gap:1
 <body>
 <header class="top">
   <div class="wrap">
-    <button class="brand" data-tab="accueil" aria-label="Accueil du Korin"><span class="mini-seal">血契</span><b>Korin</b></button>
+    <button class="brand" data-tab="tableau" aria-label="Tableau du Korin"><span class="mini-seal">血契</span><b>Korin</b></button>
     <nav class="tabs" id="tabs" aria-label="Sections">
       <button class="tab" data-tab="tableau">Tableau</button>
       <button class="tab" data-tab="equipes">Équipes</button>
       <button class="tab" data-tab="paris">Paris</button>
       <button class="tab" data-tab="classement">Classement</button>
-      <button class="tab" data-tab="historique">Historique</button>
       <button class="tab tab-orga" data-tab="orga" id="tab-orga">Gérance</button>
       <button class="tab tab-compte" data-tab="compte" id="tab-compte">Connexion</button>
     </nav>
@@ -733,34 +732,36 @@ const emptyBox = (kj, text) => `<div class="empty"><span class="kj">${kj}</span>
 const isAdmin = () => backend && backend.isAdmin;
 
 /* ---------- Vues ---------- */
-function vAccueil(){
-  const live = S.teams.filter(t => teamStatus(t.id).key !== "out").length;
+/* Gérance → Aperçu : chiffres clés, avec le détail des paris (réservé à la gérance) */
+function gApercu(){
+  const inRace = S.teams.filter(t => teamStatus(t.id).key !== "out").length;
   const pend = S.bets.filter(b => b.status === "en_cours");
   const open = S.matches.filter(m => m.status === "ouvert");
   const done = S.matches.filter(m => m.status === "termine" && !m.bye).sort((a, b) => (b.decided_at || "").localeCompare(a.decided_at || "")).slice(0, 4);
   const c = champion();
+  const accts = accountList || [];
   return `
-  <div class="sec-head"><div>
-    <h1 class="pt"><span class="k">砂</span>Korin de Suna</h1>
-    <p class="sub">Tournoi en 2 contre 2 organisé par la famille Chiiketsu. Suis le tableau, les paris et le classement en direct.</p>
-  </div></div>
-  ${c ? `<div class="panel" style="text-align:center;border-color:var(--gold)"><span class="eyebrow">Champions du Korin</span>
+  ${c ? `<div class="panel" style="text-align:center;border-color:var(--gold);margin-top:22px"><span class="eyebrow">Champions du Korin</span>
     <div class="crown" style="border:0;background:none;padding:6px 0 0"><strong>${esc(c.name)}</strong><span>${esc(c.player1)} & ${esc(c.player2)}</span></div></div>` : ""}
   <div class="stats">
-    <div class="stat"><div class="eyebrow">Équipes en course</div><div class="v">${live}<small>sur ${S.teams.length}</small></div></div>
+    <div class="stat"><div class="eyebrow">Équipes en course</div><div class="v">${inRace}<small>sur ${S.teams.length}</small></div></div>
     <div class="stat"><div class="eyebrow">Paris en cours</div><div class="v">${pend.length}</div></div>
     <div class="stat"><div class="eyebrow">Ryos en jeu</div><div class="v">${fmt(pend.reduce((s, b) => s + b.amount, 0))}<small>両</small></div></div>
   </div>
+  ${backend.mode === "live" ? `<div class="stats">
+    <div class="stat"><div class="eyebrow">Comptes inscrits</div><div class="v">${accts.length}</div></div>
+    <div class="stat"><div class="eyebrow">Ryos sur les comptes</div><div class="v">${fmt(accts.reduce((s, a) => s + a.balance, 0))}<small>両</small></div></div>
+    <div class="stat"><div class="eyebrow">Blacklistés</div><div class="v">${S.blacklist.length}</div></div>
+  </div>` : ""}
 
   <section class="sec">
-    <div class="sec-head"><div><h2><span class="k">賭</span>Combats ouverts aux paris</h2>
-      <p class="sub">${backend.mode === "live" ? "Connecte-toi pour parier tes ryos directement sur le site." : "Les paris s'enregistrent auprès de la famille Chiiketsu."} Gain = mise × cote du moment.</p></div>
-      <button class="btn ghost" data-tab="paris">Tous les paris</button></div>
+    <div class="sec-head"><h2><span class="k">賭</span>Combats ouverts aux paris</h2>
+      <button class="btn ghost" data-act="gtab" data-g="combats">Gérer les combats</button></div>
     ${open.length ? `<div class="duels">${open.map(duel).join("")}</div>` : emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}
   </section>
 
   <section class="sec">
-    <div class="sec-head"><h2><span class="k">史</span>Derniers résultats</h2><button class="btn ghost" data-tab="historique">Historique</button></div>
+    <div class="sec-head"><h2><span class="k">史</span>Derniers résultats</h2><button class="btn ghost" data-act="gtab" data-g="historique">Historique</button></div>
     ${done.length ? `<div class="duels">${done.map(duel).join("")}</div>` : emptyBox("砂", "Aucun combat n'a encore été joué.")}
   </section>`;
 }
@@ -796,9 +797,8 @@ function bm(m){
   return `<div class="bm ${m.status === "ouvert" ? "open" : ""}">${line("a")}${line("b")}<div class="bm-st">${st}</div></div>`;
 }
 
-function vEquipes(){
+function teamLists(canDelete){
   const drawn = S.matches.length > 0;
-  const admin = isAdmin();
   const card = t => {
     const st = teamStatus(t.id);
     const chip = {inscrite:'<span class="pill p-wait">Inscrite</span>', in:'<span class="pill p-in">En course</span>',
@@ -806,34 +806,39 @@ function vEquipes(){
     return `<div class="team ${st.key === "out" ? "out" : ""}">
       <div class="nm">${esc(t.name)}</div>
       <div class="pl">${esc(t.player1)}<em>×</em>${esc(t.player2)}</div>
-      <div class="team-foot">${chip}${admin && !drawn ? `<button class="btn danger sm" data-act="del-team" data-id="${t.id}" data-confirm="Retirer ?">Retirer</button>` : ""}</div>
+      <div class="team-foot">${chip}${canDelete ? `<button class="btn danger sm" data-act="del-team" data-id="${t.id}" data-confirm="Retirer ?">Retirer</button>` : ""}</div>
     </div>`;
   };
-  const form = admin ? (drawn
-      ? `<p class="hint">Le tableau est tiré : les inscriptions sont closes. Pour en rouvrir, réinitialise le tournoi depuis l'onglet Gérance.</p>`
-      : `<form class="form" id="team-form" data-form="team">
-          <label class="f"><span class="eyebrow">Nom de l'équipe</span><input id="tf-name" maxlength="60" required></label>
-          <label class="f"><span class="eyebrow">Combattant 1</span><input id="tf-p1" maxlength="60" required></label>
-          <label class="f"><span class="eyebrow">Combattant 2</span><input id="tf-p2" maxlength="60" required></label>
-          <button class="btn" type="submit">Inscrire l'équipe</button>
-        </form>`)
-    : `<p class="hint">Les équipes sont inscrites par la gérance du Korin. Une équipe = deux combattants. Pour parier, crée librement ton compte dans l'onglet Connexion.</p>`;
+  if (!S.teams.length) return `<section class="sec">${emptyBox("組", "Aucune équipe inscrite pour l'instant.")}</section>`;
+  if (!drawn) return `<section class="sec"><div class="sec-head"><h2>Inscrites · ${S.teams.length}</h2></div><div class="teams">${S.teams.map(card).join("")}</div></section>`;
+  const ins = S.teams.filter(t => teamStatus(t.id).key !== "out").sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank);
+  const outs = S.teams.filter(t => teamStatus(t.id).key === "out").sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank);
+  return `<section class="sec"><div class="sec-head"><h2>Encore en course · ${ins.length}</h2></div>
+      ${ins.length ? `<div class="teams">${ins.map(card).join("")}</div>` : emptyBox("砂", "Plus aucune équipe en course.")}</section>
+    <section class="sec"><div class="sec-head"><h2>Éliminées · ${outs.length}</h2></div>
+      ${outs.length ? `<div class="teams">${outs.map(card).join("")}</div>` : emptyBox("砂", "Aucune équipe éliminée pour l'instant.")}</section>`;
+}
 
-  let lists;
-  if (!S.teams.length) lists = `<section class="sec">${emptyBox("組", "Aucune équipe inscrite pour l'instant.")}</section>`;
-  else if (!drawn) lists = `<section class="sec"><div class="sec-head"><h2>Inscrites · ${S.teams.length}</h2></div><div class="teams">${S.teams.map(card).join("")}</div></section>`;
-  else {
-    const ins = S.teams.filter(t => teamStatus(t.id).key !== "out").sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank);
-    const outs = S.teams.filter(t => teamStatus(t.id).key === "out").sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank);
-    lists = `<section class="sec"><div class="sec-head"><h2>Encore en course · ${ins.length}</h2></div>
-        ${ins.length ? `<div class="teams">${ins.map(card).join("")}</div>` : emptyBox("砂", "Plus aucune équipe en course.")}</section>
-      <section class="sec"><div class="sec-head"><h2>Éliminées · ${outs.length}</h2></div>
-        ${outs.length ? `<div class="teams">${outs.map(card).join("")}</div>` : emptyBox("砂", "Aucune équipe éliminée pour l'instant.")}</section>`;
-  }
+function vEquipes(){
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">組</span>Équipes</h1>
-      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}.</p></div></div>
-    ${form}
-    ${lists}`;
+      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}. Une équipe = deux combattants, inscrite par la gérance du Korin.</p></div></div>
+    ${teamLists(false)}`;
+}
+
+/* Gérance → Équipes : inscription et retrait (avant le tirage) */
+function gEquipes(){
+  const drawn = S.matches.length > 0;
+  const form = drawn
+    ? `<p class="hint">Le tableau est tiré : les inscriptions sont closes. Pour en rouvrir, retire le tableau ou réinitialise le tournoi dans Gérance → Combats.</p>`
+    : `<form class="form" id="team-form" data-form="team">
+        <label class="f"><span class="eyebrow">Nom de l'équipe</span><input id="tf-name" maxlength="60" required></label>
+        <label class="f"><span class="eyebrow">Combattant 1</span><input id="tf-p1" maxlength="60" required></label>
+        <label class="f"><span class="eyebrow">Combattant 2</span><input id="tf-p2" maxlength="60" required></label>
+        <button class="btn" type="submit">Inscrire l'équipe</button>
+      </form>`;
+  return `<section class="sec"><div class="sec-head"><div><h2>Inscrire une équipe</h2>
+      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}. Les combattants blacklistés sont refusés.</p></div></div>${form}</section>
+    ${teamLists(!drawn)}`;
 }
 
 function betRows(list, withDelete){
@@ -854,37 +859,43 @@ function betRows(list, withDelete){
   }).join("");
 }
 
-function vParis(){
-  const admin = isAdmin();
-  const open = S.matches.filter(m => m.status === "ouvert");
-  const closed = S.matches.filter(m => m.status === "ferme");
-  const pend = S.bets.filter(b => b.status === "en_cours");
+/* Formulaire de pari. forOthers : version gérance, avec le choix du parieur. */
+function betFormHtml(forOthers){
   const live = backend.mode === "live";
-  const names = [...new Set(S.bets.map(b => b.bettor.trim()))].sort((a, b) => a.localeCompare(b, "fr"));
-  const who = !live
-    ? `<label class="f"><span class="eyebrow">Parieur</span><input id="bf-who" list="bf-names" maxlength="60" required>
-        <datalist id="bf-names">${names.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist></label>`
-    : admin && accountList && accountList.length > 1
-    ? `<label class="f"><span class="eyebrow">Pour le compte de</span><select id="bf-user">${accountList.map(a =>
-        `<option value="${a.user_id}"${a.user_id === backend.user.id ? " selected" : ""}>${esc(a.username)} · ${fmt(a.balance)} 両</option>`).join("")}</select></label>`
-    : "";
-  const betForm = `<form class="form" id="bet-form" data-form="bet">
+  const open = S.matches.filter(m => m.status === "ouvert");
+  let who = "";
+  if (forOthers && !live){
+    const names = [...new Set(S.bets.map(b => b.bettor.trim()))].sort((a, b) => a.localeCompare(b, "fr"));
+    who = `<label class="f"><span class="eyebrow">Parieur</span><input id="bf-who" list="bf-names" maxlength="60" required>
+      <datalist id="bf-names">${names.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist></label>`;
+  } else if (forOthers){
+    who = `<label class="f"><span class="eyebrow">Pour le compte de</span><select id="bf-user">${(accountList || []).filter(a => !isBlacklisted(a.username)).map(a =>
+      `<option value="${a.user_id}"${a.user_id === backend.user.id ? " selected" : ""}>${esc(a.username)} · ${fmt(a.balance)} 両</option>`).join("")}</select></label>`;
+  }
+  return `<form class="form" id="bet-form" data-form="bet">
       ${who}
       <label class="f"><span class="eyebrow">Combat</span><select id="bet-match">${open.map(m => `<option value="${m.id}">${esc(roundName(m.round))} · ${esc(vsLabel(m))}</option>`).join("")}</select></label>
       <label class="f"><span class="eyebrow">Équipe choisie</span><select id="bet-team"></select></label>
       <label class="f"><span class="eyebrow">Mise (ryos)</span><input id="bf-amount" type="number" min="1" step="1" inputmode="numeric" required></label>
       <p class="gain full" id="bet-gain">Gain possible : <b>—</b></p>
-      <button class="btn" type="submit">${live ? "Parier" : "Enregistrer le pari"}</button>
+      <button class="btn" type="submit">${forOthers ? "Enregistrer le pari" : "Parier"}</button>
     </form>`;
-  let form;
-  if (!open.length) form = (live && backend.user) || admin ? `<section class="sec">${emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}</section>` : "";
-  else if (live && !backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, puis demande des ryos à la gérance. L'inscription est libre et immédiate.</p></div>
+}
+
+/* Onglet public : identique pour tout le monde, chacun ne voit que ses propres paris */
+function vParis(){
+  const live = backend.mode === "live";
+  const open = S.matches.filter(m => m.status === "ouvert");
+  const closed = S.matches.filter(m => m.status === "ferme");
+  let form = "";
+  if (!live) form = open.length ? `<p class="hint">Mode démo : les paris se saisissent dans Gérance → Paris.</p>` : "";
+  else if (!open.length) form = backend.user ? `<section class="sec">${emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}</section>` : "";
+  else if (!backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, puis demande des ryos à la gérance. L'inscription est libre et immédiate.</p></div>
       <button class="btn" data-tab="compte">Se connecter</button></div></section>`;
-  else if (live && S.me && S.me.banned && !admin) form = `<section class="sec"><div class="panel danger-zone"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div></section>`;
-  else if (live) form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
+  else if (S.me && S.me.banned) form = `<section class="sec"><div class="panel danger-zone"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div></section>`;
+  else form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
       <p class="sub">Ton solde : <b class="pos">${fmt(S.me ? S.me.balance : 0)} ryos</b>. La mise est prélevée tout de suite ; tu peux annuler tant que les paris du combat sont ouverts.</p></div></div>
-      ${betForm}</section>`;
-  else form = admin ? `<section class="sec"><div class="sec-head"><h2>Enregistrer un pari</h2></div>${betForm}</section>` : "";
+      ${betFormHtml(false)}</section>`;
   const mine = live && backend.user ? S.bets.filter(b => isMine(b) && b.status === "en_cours") : [];
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">賭</span>Paris</h1>
       <p class="sub">La cote est fixée par la gérance et gelée au moment du pari. Si l'équipe choisie gagne, le parieur reçoit sa mise multipliée par la cote.</p></div></div>
@@ -894,11 +905,21 @@ function vParis(){
       <tbody>${betRows(mine, true)}</tbody></table></div></section>` : ""}
     <section class="sec"><div class="sec-head"><h2>Ouverts aux paris · ${open.length}</h2></div>
       ${open.length ? `<div class="duels">${open.map(duel).join("")}</div>` : emptyBox("賭", "Aucun combat ouvert pour le moment.")}</section>
-    ${closed.length ? `<section class="sec"><div class="sec-head"><h2>Paris fermés, combat en attente · ${closed.length}</h2></div><div class="duels">${closed.map(duel).join("")}</div></section>` : ""}
-    ${!admin ? "" : `<section class="sec"><div class="sec-head"><div><h2>Tous les paris en cours · ${pend.length}</h2>
-      ${live ? `<p class="sub">Visible uniquement par la gérance : les joueurs ne voient que leurs propres paris.</p>` : ""}</div></div>
+    ${closed.length ? `<section class="sec"><div class="sec-head"><h2>Paris fermés, combat en attente · ${closed.length}</h2></div><div class="duels">${closed.map(duel).join("")}</div></section>` : ""}`;
+}
+
+/* Gérance → Paris : tous les paris en cours, et parier pour le compte d'un joueur */
+function gParis(){
+  const live = backend.mode === "live";
+  const open = S.matches.filter(m => m.status === "ouvert");
+  const pend = S.bets.filter(b => b.status === "en_cours");
+  return `<section class="sec"><div class="sec-head"><div><h2>${live ? "Parier pour un joueur" : "Enregistrer un pari"}</h2>
+      ${live ? `<p class="sub">La mise est prélevée sur le solde du joueur choisi, le gain lui sera versé automatiquement.</p>` : ""}</div></div>
+      ${open.length ? betFormHtml(true) : emptyBox("賭", "Aucun combat n'est ouvert : ouvre les paris d'un combat dans Gérance → Combats.")}</section>
+    <section class="sec"><div class="sec-head"><div><h2>Tous les paris en cours · ${pend.length}</h2>
+      <p class="sub">Les joueurs ne voient que leurs propres paris. Annuler un pari rend la mise au joueur.</p></div></div>
       ${pend.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th><th></th></tr></thead>
-        <tbody>${betRows(pend, true)}</tbody></table></div>` : emptyBox("両", "Aucun pari en attente de résultat.")}</section>`}`;
+        <tbody>${betRows(pend, true)}</tbody></table></div>` : emptyBox("両", "Aucun pari en attente de résultat.")}</section>`;
 }
 
 function vClassement(){
@@ -941,7 +962,7 @@ function vHistorique(){
     .filter(b => { const m = matchById(b.match_id); return hit(b.bettor) || hit(tName(b.team_id)) || (m && hit(vsLabel(m))); })
     .sort((a, b) => { const ma = matchById(a.match_id), mb = matchById(b.match_id); return ((mb && mb.decided_at) || "").localeCompare((ma && ma.decided_at) || ""); });
   const dt = s => s ? new Date(s).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "";
-  return `<div class="sec-head"><div><h1 class="pt"><span class="k">史</span>Historique</h1>
+  return `<div class="sec-head" style="margin-top:26px"><div><h2><span class="k">史</span>Historique</h2>
       <p class="sub">Tous les combats joués et tous les paris réglés.</p></div>
       <label class="f filter"><span class="eyebrow">Filtrer par parieur ou équipe</span><input id="hist-q" type="search" placeholder="Ex. Kasumi" autocomplete="off"></label></div>
     <section class="sec"><div class="sec-head"><h2>Combats joués · ${done.length}</h2></div>
@@ -1010,7 +1031,10 @@ function vOrga(){
   const n = S.teams.length;
   let size = 1; while (size < n) size *= 2;
   const drawn = S.matches.length > 0;
-  const acct = "";
+  const tabs = GTABS.filter(([k]) => backend.mode === "live" || k !== "comptes");
+  if (!tabs.some(([k]) => k === gTab)) gTab = "apercu";
+  const nav = `<div class="row" role="tablist" aria-label="Sections de la gérance">${tabs.map(([k, l]) =>
+    `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}</button>`).join("")}</div>`;
 
   const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes, ryos et gérants</h2>
       <p class="sub">Tous les comptes inscrits (l'inscription est libre). Crédite les ryos des joueurs ici. « Nommer gérant » donne tout de suite accès à cet espace : à réserver aux personnes de confiance.</p></div>
@@ -1055,9 +1079,9 @@ function vOrga(){
       <p class="sub">Règle les cotes, ferme les paris quand le combat commence, puis déclare le vainqueur. Les paris sont réglés automatiquement.</p></div></div>${out}</section>`;
   })();
 
-  return head + acct + `
+  const combats = () => `
     <section class="sec"><div class="sec-head"><div><h2>Tirage du tableau</h2>
-      <p class="sub">${plural(n, "équipe inscrite", "équipes inscrites")}${n >= 2 ? ` · tableau de ${size}${size - n ? `, ${plural(size - n, "exemption")} au premier tour` : ""}` : ""}. Les équipes s'inscrivent dans l'onglet Équipes.</p></div></div>
+      <p class="sub">${plural(n, "équipe inscrite", "équipes inscrites")}${n >= 2 ? ` · tableau de ${size}${size - n ? `, ${plural(size - n, "exemption")} au premier tour` : ""}` : ""}. Les équipes s'inscrivent dans Gérance → Équipes.</p></div></div>
       <div class="panel"><p>${drawn ? "Le tableau est déjà tiré. Le retirer efface tous les combats <b>et tous les paris</b> (les mises non réglées sont rendues)." : "Le tirage place les équipes au hasard et ouvre les paris des premiers combats avec une cote de ×2,00 par défaut."}</p>
       <button class="btn${drawn ? " danger" : ""}" data-act="draw" data-confirm="${drawn ? "Confirmer : tout effacer et retirer" : "Confirmer le tirage"}" ${n < 2 ? "disabled" : ""}>${drawn ? "Retirer le tableau" : "Tirer au sort le tableau"}</button></div>
     </section>
@@ -1066,10 +1090,17 @@ function vOrga(){
       <div class="panel danger-zone"><p>Réinitialiser efface les équipes, les combats et les paris. Les mises non réglées sont rendues, les soldes des joueurs sont conservés. Action définitive.</p>
       <div class="row"><button class="btn danger" data-act="reset" data-confirm="Confirmer : tout effacer">Réinitialiser le tournoi</button>
       ${backend.mode === "demo" ? `<button class="btn ghost" data-act="reseed" data-confirm="Confirmer">Recharger les données d'exemple</button>` : ""}</div></div>
-    </section>
-    ${accounts}
-    ${blacklist}`;
+    </section>`;
+
+  const body = {apercu:gApercu, combats, equipes:gEquipes, paris:gParis, historique:vHistorique,
+    comptes:() => accounts, blacklist:() => blacklist}[gTab]();
+  return head + nav + body;
 }
+
+/* Sous-onglets de la gérance : tout ce qui est réservé se trouve ici, nulle part ailleurs */
+let gTab = "apercu";
+const GTABS = [["apercu", "Aperçu"], ["combats", "Combats"], ["equipes", "Équipes"], ["paris", "Paris"],
+  ["historique", "Historique"], ["comptes", "Comptes et ryos"], ["blacklist", "Blacklist"]];
 
 function mrow(m){
   const both = m.team_a && m.team_b;
@@ -1094,9 +1125,9 @@ function mrow(m){
 }
 
 /* ---------- Rendu ---------- */
-const VIEWS = {accueil:vAccueil, tableau:vTableau, equipes:vEquipes, paris:vParis, classement:vClassement, historique:vHistorique, orga:vOrga, compte:vCompte};
+const VIEWS = {tableau:vTableau, equipes:vEquipes, paris:vParis, classement:vClassement, orga:vOrga, compte:vCompte};
 let tab = (location.hash || "").slice(1);
-if (!VIEWS[tab]) tab = "accueil";
+if (!VIEWS[tab]) tab = "tableau";
 
 function snapshot(){
   const o = {};
@@ -1131,9 +1162,8 @@ function updateGain(){
   g.innerHTML = `Gain possible : <b>${fmt(amt * o)} ryos</b> (mise de ${fmt(amt)}, cote ${fOdds(o)})`;
 }
 
-/* Le public et les joueurs ne voient que Tableau, Équipes, Paris, Classement et leur compte.
-   Accueil, Historique et Orga sont réservés à la gérance (simple masquage : les données restent publiques en lecture). */
-const ORGA_ONLY = ["accueil", "historique", "orga"];
+/* Onglets publics identiques pour tous ; tout ce qui est réservé est dans l'onglet Gérance. */
+const ORGA_ONLY = ["orga"];
 const canSee = t => !(backend.mode === "live" && !backend.isAdmin && ORGA_ONLY.includes(t));
 
 function render(resetForm){
@@ -1144,7 +1174,6 @@ function render(resetForm){
   syncBetForm(resetForm ? null : s.o["bet-team"]);
   const live = backend.mode === "live";
   ORGA_ONLY.forEach(t => document.querySelectorAll(`.tab[data-tab="${t}"]`).forEach(b => { b.hidden = !canSee(t); }));
-  document.querySelector(".brand").dataset.tab = canSee("accueil") ? "accueil" : "tableau";
   $("tab-compte").textContent = !live ? "Compte" : backend.user ? (S.me ? fmt(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
   document.querySelectorAll(".tab").forEach(b => { if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
 }
@@ -1186,6 +1215,7 @@ const ACTIONS = {
   "reseed": () => run(async () => { await backend.wipe(); await reload(); }, "Données d'exemple rechargées."),
   "logout": () => run(async () => { await backend.logout(); accountList = null; await reload(); }, "Déconnecté."),
   "auth-mode": b => { authMode = b.dataset.mode; render(true); },
+  "gtab": b => { gTab = b.dataset.g; if (tab !== "orga") go("orga"); else { render(true); window.scrollTo({top:0}); } },
   "load-accounts": () => run(async () => { accountList = await backend.accounts(); }),
   "orga": b => run(async () => { await backend.setOrga(b.dataset.id, b.dataset.on === "1"); accountList = await backend.accounts(); },
     b.dataset.on === "1" ? "Nommé gérant." : "Retiré de la gérance."),
