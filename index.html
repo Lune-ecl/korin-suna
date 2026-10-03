@@ -245,7 +245,7 @@ footer .wrap{padding-block:18px;display:flex;justify-content:space-between;gap:1
       <button class="tab" data-tab="paris">Paris</button>
       <button class="tab" data-tab="classement">Classement</button>
       <button class="tab" data-tab="historique">Historique</button>
-      <button class="tab tab-orga" data-tab="orga" id="tab-orga">Orga</button>
+      <button class="tab tab-orga" data-tab="orga" id="tab-orga">Gérance</button>
       <button class="tab tab-compte" data-tab="compte" id="tab-compte">Connexion</button>
     </nav>
   </div>
@@ -287,11 +287,13 @@ const plural = (n, s, p) => n + " " + (n > 1 ? (p || s + "s") : s);
 /* Connexion par nom RP (ex. « Ryuta Chiiketsu ») : Supabase exige un e-mail, on en fabrique un invisible
    à partir du nom sans accents ni majuscules (ryuta.chiiketsu@korin-suna.app). « Ryūta chiiketsu » ouvre donc le même compte. */
 const LOGIN_DOMAIN = "korin-suna.app";
+/* Même règle que public.name_key() dans schema.sql (sert aussi pour la blacklist) */
+const nameKey = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
 function cleanUsername(u){
   const name = String(u || "").trim().replace(/\s+/g, " ");
   if (name.length < 3 || name.length > 40 || !/^[\p{L}][\p{L}' .-]*[\p{L}]$/u.test(name))
     fail("Le nom doit faire 3 à 40 caractères : lettres (accents permis), espaces, apostrophe ou tiret. Ex. : Ryuta Chiiketsu.");
-  const slug = name.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
+  const slug = nameKey(name);
   if (slug.length < 2) fail("Écris ton nom en lettres latines (ex. : Ryuta Chiiketsu).");
   return {name, slug};
 }
@@ -299,7 +301,7 @@ const toEmail = u => u.slug + "@" + LOGIN_DOMAIN;
 let authMode = "login";
 let accountList = null;
 
-let S = {teams:[], matches:[], bets:[]};
+let S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[]};
 let backend = null;
 let histQ = "";
 
@@ -313,6 +315,7 @@ function demoBackend(){
     mode:"demo", isAdmin:true, user:null,
     async load(){
       if (!data){ data = {teams:[], matches:[], bets:[]}; await seedDemo(); save(); }
+      data.blacklist = data.blacklist || [];
       return clone(data);
     },
     async insert(table, rows){ data[table].push(...clone(rows)); save(); },
@@ -334,25 +337,34 @@ function supaBackend(){
   const chk = r => { if (r.error) fail(r.error.message); return r; };
   return {
     mode:"live", isAdmin:false, user:null, sb,
+    /* Les paris détaillés ne reviennent que pour soi (ou tous pour la gérance) ;
+       les totaux et le classement passent par des fonctions qui ne donnent que des sommes. */
     async load(){
-      const [t, m, b] = await Promise.all([
+      const [t, m, b, tot, lb] = await Promise.all([
         sb.from("teams").select("*").order("created_at"),
         sb.from("matches").select("*").order("round").order("slot"),
-        sb.from("bets").select("*").order("created_at", {ascending:false})
+        sb.from("bets").select("*").order("created_at", {ascending:false}),
+        sb.rpc("bet_totals"),
+        sb.rpc("leaderboard")
       ]);
       [t, m, b].forEach(chk);
-      let me = null, ledger = [];
+      const soft = r => r.error ? null : r.data;   // fonctions absentes si schema.sql n'est pas à jour : on retombe sur un calcul local
+      let me = null, ledger = [], blacklist = [];
       if (this.user){
         const [p, l] = await Promise.all([
           sb.from("profiles").select("username, balance").eq("user_id", this.user.id).maybeSingle(),
           sb.from("ledger").select("*").eq("user_id", this.user.id).order("created_at", {ascending:false}).limit(100)
         ]);
         [p, l].forEach(chk);
-        me = p.data ? {username:p.data.username, balance:Number(p.data.balance)} : null;
+        me = p.data ? {username:p.data.username, balance:Number(p.data.balance), banned:false} : null;
+        if (me) me.banned = !!soft(await sb.rpc("is_blacklisted", {p_name:me.username}));
         ledger = l.data;
+        if (this.isAdmin) blacklist = soft(await sb.from("blacklist").select("*").order("name")) || [];
       }
-      return {teams:t.data, matches:m.data, bets:b.data, me, ledger};
+      const board = soft(lb) && lb.data.map(o => ({name:o.bettor, n:o.n, won:o.won, lost:o.lost, staked:o.staked, returned:o.returned, pending:o.pending}));
+      return {teams:t.data, matches:m.data, bets:b.data, totals:soft(tot), board, me, ledger, blacklist};
     },
+    async nameBlacklisted(name){ const r = await sb.rpc("is_blacklisted", {p_name:name}); return !r.error && !!r.data; },
     async adjust(userId, delta){ chk(await sb.rpc("adjust_ryos", {p_user:userId, p_delta:delta, p_reason:null})); },
     async insert(table, rows){ chk(await sb.from(table).insert(rows)); },
     async update(table, id, patch){ chk(await sb.from(table).update(patch).eq("id", id)); },
@@ -376,9 +388,11 @@ function supaBackend(){
       const u = cleanUsername(username);
       if ((password || "").length < 6) fail("Le mot de passe doit faire au moins 6 caractères.");
       if (password !== password2) fail("Les deux mots de passe ne sont pas identiques.");
+      if (await this.nameBlacklisted(u.name)) fail("Inscription impossible : ce nom est sur la blacklist du Korin.");
       const {data, error} = await sb.auth.signUp({email:toEmail(u), password, options:{data:{username:u.name}}});
       if (error){
         if (/already|registered|exists/i.test(error.message)) fail("Ce nom est déjà pris.");
+        if (/database error/i.test(error.message)) fail("Inscription refusée : ce nom est sur la blacklist du Korin, ou il est invalide.");
         fail("Inscription refusée : " + error.message);
       }
       if (!data.session) fail("Compte créé, mais Supabase demande encore une confirmation par e-mail. Désactive « Confirm email » dans Authentication → Sign In / Providers → Email.");
@@ -394,7 +408,7 @@ function supaBackend(){
       return p.data.map(x => ({...x, balance:Number(x.balance), orga:orgas.has(x.user_id)}));
     },
     async setOrga(userId, on){
-      if (userId === this.user.id && !on) fail("Tu ne peux pas retirer tes propres droits.");
+      if (userId === this.user.id && !on) fail("Tu ne peux pas te retirer toi-même de la gérance.");
       if (on) chk(await sb.from("admins").insert([{user_id:userId}]));
       else chk(await sb.from("admins").delete().eq("user_id", userId));
     },
@@ -410,9 +424,43 @@ function supaBackend(){
 
 async function reload(){
   S = await backend.load();
-  S.me = S.me || null; S.ledger = S.ledger || [];
+  S.me = S.me || null; S.ledger = S.ledger || []; S.blacklist = S.blacklist || [];
   if (backend.mode === "live" && backend.isAdmin){ try { accountList = await backend.accounts(); } catch(e){} }
-  S.matches.forEach(m => { m.odds_a = Number(m.odds_a); m.odds_b = Number(m.odds_b); }); S.bets.forEach(b => { b.odds = Number(b.odds); b.amount = Number(b.amount); b.payout = Number(b.payout); }); }
+  S.matches.forEach(m => { m.odds_a = Number(m.odds_a); m.odds_b = Number(m.odds_b); }); S.bets.forEach(b => { b.odds = Number(b.odds); b.amount = Number(b.amount); b.payout = Number(b.payout); });
+  if (!S.totals) S.totals = computeTotals(S.bets);
+  if (!S.board) S.board = computeBoard(S.bets);
+  S.totals.forEach(x => { x.n = Number(x.n); x.total = Number(x.total); });
+  S.board = S.board.map(o => ({...o, net:Number(o.returned) - Number(o.staked)}))
+    .sort((a, b) => b.net - a.net || b.returned - a.returned || a.name.localeCompare(b.name, "fr"));
+}
+
+/* Mode démo : mêmes totaux que ceux calculés par la base en ligne */
+function computeTotals(bets){
+  const map = new Map();
+  for (const b of bets){
+    const k = b.match_id + "|" + b.team_id;
+    if (!map.has(k)) map.set(k, {match_id:b.match_id, team_id:b.team_id, n:0, total:0});
+    const o = map.get(k); o.n++; o.total += b.amount;
+  }
+  return [...map.values()];
+}
+function computeBoard(bets){
+  const map = new Map();
+  for (const b of bets){
+    const k = b.bettor.trim().toLowerCase();
+    if (!map.has(k)) map.set(k, {name:b.bettor.trim(), n:0, won:0, lost:0, staked:0, returned:0, pending:0});
+    const o = map.get(k);
+    o.n++;
+    if (b.status === "en_cours") o.pending += b.amount;
+    else { o.staked += b.amount; o.returned += b.payout; if (b.status === "gagne") o.won++; else o.lost++; }
+  }
+  return [...map.values()];
+}
+function stake(matchId, teamId){
+  return S.totals.filter(x => x.match_id === matchId && (!teamId || x.team_id === teamId))
+    .reduce((s, x) => ({n:s.n + x.n, total:s.total + x.total}), {n:0, total:0});
+}
+const isBlacklisted = name => !!nameKey(name) && S.blacklist.some(x => nameKey(x.name) === nameKey(name));
 
 /* ---------- Lecture des données ---------- */
 const teamById = id => S.teams.find(t => t.id === id);
@@ -437,24 +485,13 @@ function teamStatus(id){
   return {key:"in", label:"En course", rank:reached + 0.5};
 }
 
-function bettors(){
-  const map = new Map();
-  for (const b of S.bets){
-    const k = b.bettor.trim().toLowerCase();
-    if (!map.has(k)) map.set(k, {name:b.bettor.trim(), n:0, won:0, lost:0, staked:0, returned:0, pending:0});
-    const o = map.get(k);
-    o.n++;
-    if (b.status === "en_cours") o.pending += b.amount;
-    else { o.staked += b.amount; o.returned += b.payout; if (b.status === "gagne") o.won++; else o.lost++; }
-  }
-  return [...map.values()].map(o => ({...o, net:o.returned - o.staked}))
-    .sort((a, b) => b.net - a.net || b.returned - a.returned || a.name.localeCompare(b.name, "fr"));
-}
+const bettors = () => S.board;
 
-/* ---------- Actions des organisateurs ---------- */
+/* ---------- Actions de la gérance ---------- */
 async function addTeam({name, p1, p2}){
   name = (name || "").trim(); p1 = (p1 || "").trim(); p2 = (p2 || "").trim();
   if (!name || !p1 || !p2) fail("Remplis le nom de l'équipe et les deux combattants.");
+  for (const p of [p1, p2]) if (isBlacklisted(p)) fail(p + " est sur la blacklist du Korin.");
   if (S.matches.length) fail("Le tableau est déjà tiré. Réinitialise le tournoi pour ajouter une équipe.");
   if (S.teams.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) fail("Une équipe porte déjà ce nom.");
   await backend.insert("teams", [{id:uid(), name, player1:p1, player2:p2, created_at:now()}]);
@@ -579,6 +616,8 @@ async function addBet({bettor, userId, matchId, teamId, amount}){
     if (!bettor) fail("Indique le nom du parieur.");
     userId = null;
   }
+  if ((S.me && userId === (backend.user || {}).id && S.me.banned) || isBlacklisted(bettor))
+    fail(bettor + " est sur la blacklist du Korin : paris interdits.");
   const odds = teamId === m.team_a ? m.odds_a : m.odds_b;
   const row = {id:uid(), bettor, match_id:matchId, team_id:teamId, amount, odds, status:"en_cours", payout:0, created_at:now()};
   if (userId) row.user_id = userId;
@@ -597,6 +636,17 @@ async function deleteBet(id){
   await reload();
 }
 
+async function addBlacklist(name, reason){
+  name = String(name || "").trim().replace(/\s+/g, " ");
+  reason = String(reason || "").trim();
+  if (nameKey(name).length < 2) fail("Indique le prénom et le nom à blacklister.");
+  if (isBlacklisted(name)) fail(name + " est déjà sur la blacklist.");
+  const acct = (accountList || []).find(a => nameKey(a.username) === nameKey(name));
+  if (acct && acct.orga) fail("Retire d'abord cette personne de la gérance.");
+  await backend.insert("blacklist", [{id:uid(), name, reason:reason || null, created_at:now()}]);
+  await reload();
+}
+
 async function adjustBalance(userId, value, sign){
   const n = Math.round(Number(String(value || "").replace(/\s/g, "")));
   if (!(n > 0)) fail("Indique un nombre de ryos positif.");
@@ -611,7 +661,7 @@ async function resetAll(){
 
 /* ---------- Données d'exemple (mode démo uniquement) ---------- */
 async function seedDemo(){
-  S = {teams:[], matches:[], bets:[]};
+  S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[]};
   const teams = [
     ["Les Scorpions Rouges", "Akio Sabaku", "Rin Kazeno"],
     ["Tempête d'Ocre", "Daisuke Hokori", "Mei Sunagawa"],
@@ -656,7 +706,7 @@ function pill(m){
 function side(m, k){
   const id = k === "a" ? m.team_a : m.team_b, t = teamById(id);
   const o = k === "a" ? m.odds_a : m.odds_b;
-  const staked = S.bets.filter(b => b.match_id === m.id && b.team_id === id).reduce((s, b) => s + b.amount, 0);
+  const staked = id ? stake(m.id, id).total : 0;
   const cls = m.winner ? (m.winner === id ? "win" : "lose") : "";
   return `<div class="side ${cls}">
     <div class="nm">${esc(t ? t.name : "À déterminer")}</div>
@@ -666,8 +716,7 @@ function side(m, k){
 }
 
 function duel(m){
-  const bs = S.bets.filter(b => b.match_id === m.id);
-  const total = bs.reduce((s, b) => s + b.amount, 0);
+  const st = stake(m.id), total = st.total, bs = {length:st.n};
   return `<article class="duel">
     <div class="duel-head"><span class="eyebrow">${esc(roundName(m.round))}</span>${pill(m)}</div>
     ${side(m, "a")}<div class="vs">VS</div>${side(m, "b")}
@@ -761,14 +810,14 @@ function vEquipes(){
     </div>`;
   };
   const form = admin ? (drawn
-      ? `<p class="hint">Le tableau est tiré : les inscriptions sont closes. Pour en rouvrir, réinitialise le tournoi depuis l'onglet Orga.</p>`
+      ? `<p class="hint">Le tableau est tiré : les inscriptions sont closes. Pour en rouvrir, réinitialise le tournoi depuis l'onglet Gérance.</p>`
       : `<form class="form" id="team-form" data-form="team">
           <label class="f"><span class="eyebrow">Nom de l'équipe</span><input id="tf-name" maxlength="60" required></label>
           <label class="f"><span class="eyebrow">Combattant 1</span><input id="tf-p1" maxlength="60" required></label>
           <label class="f"><span class="eyebrow">Combattant 2</span><input id="tf-p2" maxlength="60" required></label>
           <button class="btn" type="submit">Inscrire l'équipe</button>
         </form>`)
-    : `<p class="hint">Les inscriptions se font auprès de la famille Chiiketsu. Une équipe = deux combattants.</p>`;
+    : `<p class="hint">Les équipes sont inscrites par la gérance du Korin. Une équipe = deux combattants. Pour parier, crée librement ton compte dans l'onglet Connexion.</p>`;
 
   let lists;
   if (!S.teams.length) lists = `<section class="sec">${emptyBox("組", "Aucune équipe inscrite pour l'instant.")}</section>`;
@@ -829,15 +878,16 @@ function vParis(){
     </form>`;
   let form;
   if (!open.length) form = (live && backend.user) || admin ? `<section class="sec">${emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}</section>` : "";
-  else if (live && !backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, puis demande des ryos à la famille Chiiketsu.</p></div>
+  else if (live && !backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, puis demande des ryos à la gérance. L'inscription est libre et immédiate.</p></div>
       <button class="btn" data-tab="compte">Se connecter</button></div></section>`;
+  else if (live && S.me && S.me.banned && !admin) form = `<section class="sec"><div class="panel danger-zone"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div></section>`;
   else if (live) form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
       <p class="sub">Ton solde : <b class="pos">${fmt(S.me ? S.me.balance : 0)} ryos</b>. La mise est prélevée tout de suite ; tu peux annuler tant que les paris du combat sont ouverts.</p></div></div>
       ${betForm}</section>`;
   else form = admin ? `<section class="sec"><div class="sec-head"><h2>Enregistrer un pari</h2></div>${betForm}</section>` : "";
   const mine = live && backend.user ? S.bets.filter(b => isMine(b) && b.status === "en_cours") : [];
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">賭</span>Paris</h1>
-      <p class="sub">La cote est fixée par les organisateurs et gelée au moment du pari. Si l'équipe choisie gagne, le parieur reçoit sa mise multipliée par la cote.</p></div></div>
+      <p class="sub">La cote est fixée par la gérance et gelée au moment du pari. Si l'équipe choisie gagne, le parieur reçoit sa mise multipliée par la cote.</p></div></div>
     ${form}
     ${mine.length ? `<section class="sec"><div class="sec-head"><h2>Mes paris en cours · ${mine.length}</h2></div>
       <div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th><th></th></tr></thead>
@@ -845,9 +895,10 @@ function vParis(){
     <section class="sec"><div class="sec-head"><h2>Ouverts aux paris · ${open.length}</h2></div>
       ${open.length ? `<div class="duels">${open.map(duel).join("")}</div>` : emptyBox("賭", "Aucun combat ouvert pour le moment.")}</section>
     ${closed.length ? `<section class="sec"><div class="sec-head"><h2>Paris fermés, combat en attente · ${closed.length}</h2></div><div class="duels">${closed.map(duel).join("")}</div></section>` : ""}
-    <section class="sec"><div class="sec-head"><h2>Paris en cours · ${pend.length}</h2></div>
-      ${pend.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th>${admin ? "<th></th>" : ""}</tr></thead>
-        <tbody>${betRows(pend, admin)}</tbody></table></div>` : emptyBox("両", "Aucun pari en attente de résultat.")}</section>`;
+    ${!admin ? "" : `<section class="sec"><div class="sec-head"><div><h2>Tous les paris en cours · ${pend.length}</h2>
+      ${live ? `<p class="sub">Visible uniquement par la gérance : les joueurs ne voient que leurs propres paris.</p>` : ""}</div></div>
+      ${pend.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th><th></th></tr></thead>
+        <tbody>${betRows(pend, true)}</tbody></table></div>` : emptyBox("両", "Aucun pari en attente de résultat.")}</section>`}`;
 }
 
 function vClassement(){
@@ -916,8 +967,8 @@ function authForm(){
     <label class="f"><span class="eyebrow">Mot de passe</span><input id="lg-pw" type="password" autocomplete="${su ? "new-password" : "current-password"}" required></label>
     ${su ? `<label class="f"><span class="eyebrow">Confirmer le mot de passe</span><input id="lg-pw2" type="password" autocomplete="new-password" required></label>` : ""}
     <button class="btn" type="submit">${su ? "Créer le compte" : "Se connecter"}</button></form>
-    <p class="hint">${su ? "Ton prénom et ton nom de personnage, ex. Ryuta Chiiketsu (accents permis). Pas besoin d'e-mail. Ton compte démarre à 0 ryo : la famille Chiiketsu crédite ton solde."
-      : "Pas besoin de compte pour suivre le tournoi, seulement pour parier."}</p>`;
+    <p class="hint">${su ? "Inscription libre et immédiate, sans validation. Ton prénom et ton nom de personnage, ex. Ryuta Chiiketsu (accents permis). Pas besoin d'e-mail. Ton compte démarre à 0 ryo : la gérance crédite ton solde."
+      : "Pas de compte ? Clique sur « Créer un compte » : c'est immédiat. Pas besoin de compte pour suivre le tournoi, seulement pour parier."}</p>`;
 }
 
 function vCompte(){
@@ -930,10 +981,11 @@ function vCompte(){
   const dt = s => new Date(s).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
   return head("Ton solde, tes paris et tous les mouvements de ryos.") + `
     <div class="panel wallet">
-      <div><div class="eyebrow">Solde de ${esc(me.username)}${backend.isAdmin ? " · organisateur" : ""}</div><div class="v">${fmt(me.balance)}<small>両</small></div></div>
+      <div><div class="eyebrow">Solde de ${esc(me.username)}${backend.isAdmin ? " · gérance" : ""}</div><div class="v">${fmt(me.balance)}<small>両</small></div></div>
       <div class="row"><button class="btn" data-tab="paris">Parier</button><button class="btn ghost" data-act="logout">Se déconnecter</button></div>
     </div>
-    <p class="hint">Pour recevoir des ryos, adresse-toi à la famille Chiiketsu. Les gains sont versés automatiquement dès que le vainqueur d'un combat est déclaré.</p>
+    ${me.banned ? `<div class="panel danger-zone" style="margin-top:12px"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div>` : ""}
+    <p class="hint">Pour recevoir des ryos, adresse-toi à la gérance (famille Chiiketsu). Les gains sont versés automatiquement dès que le vainqueur d'un combat est déclaré.</p>
     <section class="sec"><div class="sec-head"><h2>Mes paris · ${mine.length}</h2></div>
     ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Résultat</th><th></th></tr></thead>
       <tbody>${betRows(mine, true)}</tbody></table></div>` : emptyBox("賭", "Tu n'as encore placé aucun pari.")}
@@ -947,35 +999,50 @@ function vCompte(){
 }
 
 function vOrga(){
-  const head = `<div class="sec-head"><div><h1 class="pt"><span class="k">契</span>Espace organisateurs</h1>
-    <p class="sub">Réservé à la famille Chiiketsu : tirage du tableau, cotes, ouverture des paris, résultats et ryos des joueurs.</p></div></div>`;
+  const head = `<div class="sec-head"><div><h1 class="pt"><span class="k">契</span>Gérance</h1>
+    <p class="sub">Réservé à la gérance du Korin : tirage du tableau, cotes, résultats, ryos des joueurs, gérants et blacklist.</p></div></div>`;
   if (backend.mode === "live" && !backend.user){
-    return head + `<div class="panel"><p>Connecte-toi avec ton compte d'organisateur.</p><button class="btn" data-tab="compte">Se connecter</button></div>`;
+    return head + `<div class="panel"><p>Connecte-toi avec ton compte de gérant.</p><button class="btn" data-tab="compte">Se connecter</button></div>`;
   }
   if (backend.mode === "live" && !backend.isAdmin){
-    return head + `<div class="panel"><p>Connecté en tant que <b>${esc(backend.username)}</b>. Ton compte n'a pas les droits d'organisateur : demande à un membre de la famille Chiiketsu de te les donner.</p></div>`;
+    return head + `<div class="panel"><p>Connecté en tant que <b>${esc(backend.username)}</b>. Ce compte ne fait pas partie de la gérance.</p></div>`;
   }
   const n = S.teams.length;
   let size = 1; while (size < n) size *= 2;
   const drawn = S.matches.length > 0;
   const acct = "";
 
-  const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes et ryos</h2>
-      <p class="sub">Tous les comptes du site. Crédite les ryos des joueurs ici (ex. après un dépôt en RP). Donne les droits d'organisateur uniquement aux membres de confiance.</p></div>
+  const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes, ryos et gérants</h2>
+      <p class="sub">Tous les comptes inscrits (l'inscription est libre). Crédite les ryos des joueurs ici. « Nommer gérant » donne tout de suite accès à cet espace : à réserver aux personnes de confiance.</p></div>
       <button class="btn ghost sm" data-act="load-accounts">Actualiser</button></div>
     ${accountList === null ? emptyBox("契", "Clique sur « Actualiser » pour afficher les comptes.")
-      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom d'utilisateur</th><th>Créé le</th><th class="num">Solde</th><th class="num">Créditer / retirer</th><th>Rôle</th><th></th></tr></thead><tbody>
-        ${accountList.map(a => `<tr><td class="who">${esc(a.username)}</td><td class="mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
+      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Inscrit le</th><th class="num">Solde</th><th class="num">Créditer / retirer</th><th>Rôle</th><th></th></tr></thead><tbody>
+        ${accountList.map(a => { const bl = isBlacklisted(a.username); return `<tr><td class="who">${esc(a.username)}</td><td class="mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
           <td class="num"><b class="pos">${fmt(a.balance)}</b> 両</td>
           <td><div class="adj"><input id="adj-${a.user_id}" type="number" min="1" step="1" inputmode="numeric" placeholder="Ryos" aria-label="Montant pour ${esc(a.username)}">
             <button class="btn sm" data-act="adj" data-id="${a.user_id}" data-sign="1">+ Créditer</button>
             <button class="btn ghost sm" data-act="adj" data-id="${a.user_id}" data-sign="-1">− Retirer</button></div></td>
-          <td>${a.orga ? '<span class="pill p-open">Organisateur</span>' : '<span class="pill p-wait">Joueur</span>'}</td>
-          <td class="num">${a.user_id === backend.user.id ? '<span class="mut">Toi</span>' : a.orga
-            ? `<button class="btn danger sm" data-act="orga" data-id="${a.user_id}" data-on="0" data-confirm="Confirmer">Retirer les droits</button>`
-            : `<button class="btn sm" data-act="orga" data-id="${a.user_id}" data-on="1" data-confirm="Confirmer">Rendre organisateur</button>`}</td></tr>`).join("")}
+          <td>${a.orga ? '<span class="pill p-open">Gérant</span>' : bl ? '<span class="pill p-closed">Blacklisté</span>' : '<span class="pill p-wait">Joueur</span>'}</td>
+          <td class="num"><div class="adj">${a.user_id === backend.user.id ? '<span class="mut">Toi</span>' : a.orga
+            ? `<button class="btn danger sm" data-act="orga" data-id="${a.user_id}" data-on="0" data-confirm="Confirmer">Retirer de la gérance</button>`
+            : `<button class="btn sm" data-act="orga" data-id="${a.user_id}" data-on="1">Nommer gérant</button>
+               ${bl ? "" : `<button class="btn danger sm" data-act="bl-acct" data-name="${esc(a.username)}" data-confirm="Confirmer">Blacklister</button>`}`}</div></td></tr>`; }).join("")}
         </tbody></table></div>` : emptyBox("契", "Aucun compte pour l'instant.")}
     </section>`;
+
+  const blacklist = `<section class="sec"><div class="sec-head"><div><h2><span class="k">禁</span>Blacklist du tournoi · ${S.blacklist.length}</h2>
+      <p class="sub">Une personne blacklistée ne peut plus parier, ni créer de compte, ni être inscrite dans une équipe. Les majuscules et accents ne comptent pas (« Ryūta » = « ryuta »). Ses paris déjà placés restent : annule-les dans l'onglet Paris si besoin.</p></div></div>
+    <form class="form" data-form="blacklist">
+      <label class="f"><span class="eyebrow">Prénom et nom RP</span><input id="bl-name" maxlength="40" placeholder="Ex. Ryuta Chiiketsu" required></label>
+      <label class="f"><span class="eyebrow">Motif (facultatif)</span><input id="bl-reason" maxlength="120"></label>
+      <button class="btn danger" type="submit">Ajouter à la blacklist</button>
+    </form>
+    ${S.blacklist.length ? `<div class="tbl-wrap" style="margin-top:14px"><table><thead><tr><th>Nom</th><th>Motif</th><th>Depuis le</th><th></th></tr></thead><tbody>
+      ${S.blacklist.map(x => `<tr><td class="who">${esc(x.name)}</td><td class="mut">${esc(x.reason || "—")}</td>
+        <td class="mut">${x.created_at ? new Date(x.created_at).toLocaleDateString("fr-FR") : ""}</td>
+        <td class="num"><button class="btn ghost sm" data-act="bl-del" data-id="${x.id}" data-confirm="Confirmer">Retirer de la blacklist</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<div style="margin-top:14px">${emptyBox("禁", "Personne n'est blacklisté.")}</div>`}
+  </section>`;
 
   const manage = !drawn ? "" : (() => {
     let out = "";
@@ -1000,7 +1067,8 @@ function vOrga(){
       <div class="row"><button class="btn danger" data-act="reset" data-confirm="Confirmer : tout effacer">Réinitialiser le tournoi</button>
       ${backend.mode === "demo" ? `<button class="btn ghost" data-act="reseed" data-confirm="Confirmer">Recharger les données d'exemple</button>` : ""}</div></div>
     </section>
-    ${accounts}`;
+    ${accounts}
+    ${blacklist}`;
 }
 
 function mrow(m){
@@ -1120,7 +1188,9 @@ const ACTIONS = {
   "auth-mode": b => { authMode = b.dataset.mode; render(true); },
   "load-accounts": () => run(async () => { accountList = await backend.accounts(); }),
   "orga": b => run(async () => { await backend.setOrga(b.dataset.id, b.dataset.on === "1"); accountList = await backend.accounts(); },
-    b.dataset.on === "1" ? "Droits d'organisateur donnés." : "Droits retirés.")
+    b.dataset.on === "1" ? "Nommé gérant." : "Retiré de la gérance."),
+  "bl-acct": b => run(() => addBlacklist(b.dataset.name, ""), "Ajouté à la blacklist."),
+  "bl-del": b => run(async () => { await backend.remove("blacklist", b.dataset.id); await reload(); }, "Retiré de la blacklist.")
 };
 
 document.addEventListener("click", e => {
@@ -1144,6 +1214,7 @@ document.addEventListener("submit", e => {
   const k = f.dataset.form;
   if (k === "team") run(() => addTeam({name:$("tf-name").value, p1:$("tf-p1").value, p2:$("tf-p2").value}), "Équipe inscrite.", true);
   if (k === "bet") run(() => addBet({bettor:($("bf-who") || {}).value, userId:($("bf-user") || {}).value, matchId:$("bet-match").value, teamId:$("bet-team").value, amount:$("bf-amount").value}), "Pari enregistré.", true);
+  if (k === "blacklist") run(() => addBlacklist($("bl-name").value, $("bl-reason").value), "Ajouté à la blacklist.", true);
   if (k === "login") run(async () => { await backend.login($("lg-user").value, $("lg-pw").value); await reload(); }, "Connecté.", true);
   if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value); authMode = "login"; await reload(); }, "Compte créé. Bienvenue !", true);
 });
@@ -1171,6 +1242,8 @@ async function init(){
       setTimeout(async () => { try { await backend.checkAdmin(); await reload(); } catch(e){} render(false); }, 0);
     });
     backend.subscribe(async () => { try { await reload(); render(false); } catch(e){} });
+    /* Les joueurs ne reçoivent pas en direct les paris des autres (invisibles pour eux) : on rafraîchit les totaux toutes les 30 s. */
+    setInterval(async () => { if (document.hidden) return; try { await reload(); render(false); } catch(e){} }, 30000);
   } else {
     backend = demoBackend();
     notice(wantsLive

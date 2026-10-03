@@ -59,13 +59,77 @@ alter table public.profiles drop constraint if exists profiles_username_check;
 alter table public.profiles add constraint profiles_username_check
   check (username = btrim(username) and char_length(username) between 3 and 40);
 
--- Crée automatiquement le profil quand quelqu'un s'inscrit sur le site
+-- Clé d'un nom : sans accents ni majuscules (« Ryūta Chiiketsu » → ryuta.chiiketsu), comme l'e-mail invisible
+create or replace function public.name_key(p text)
+returns text
+language sql immutable
+as $$
+  select btrim(regexp_replace(lower(regexp_replace(normalize(coalesce(p, ''), NFD), '[̀-ͯ]', '', 'g')), '[^a-z0-9]+', '.', 'g'), '.');
+$$;
+
+-- =============================================================
+--  Blacklist du tournoi : un nom blacklisté ne peut ni s'inscrire,
+--  ni parier, ni être inscrit dans une équipe.
+-- =============================================================
+create table if not exists public.blacklist (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  key         text not null unique,
+  reason      text,
+  created_at  timestamptz not null default now()
+);
+
+create or replace function public.blacklist_set_key()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  new.name := btrim(new.name);
+  new.key := public.name_key(new.name);
+  if new.key = '' then raise exception 'Indique un nom.'; end if;
+  return new;
+end;
+$$;
+drop trigger if exists blacklist_set_key on public.blacklist;
+create trigger blacklist_set_key before insert or update on public.blacklist
+  for each row execute function public.blacklist_set_key();
+
+create or replace function public.is_blacklisted(p_name text)
+returns boolean
+language sql stable security definer
+set search_path = public
+as $$
+  select exists (select 1 from public.blacklist where key = public.name_key(p_name));
+$$;
+grant execute on function public.is_blacklisted(text) to anon, authenticated;
+
+-- Une équipe ne peut pas contenir un combattant blacklisté
+create or replace function public.teams_check_blacklist()
+returns trigger
+language plpgsql security definer
+set search_path = public
+as $$
+begin
+  if public.is_blacklisted(new.player1) then raise exception '% est sur la blacklist du Korin.', new.player1; end if;
+  if public.is_blacklisted(new.player2) then raise exception '% est sur la blacklist du Korin.', new.player2; end if;
+  return new;
+end;
+$$;
+drop trigger if exists teams_check_blacklist on public.teams;
+create trigger teams_check_blacklist before insert or update on public.teams
+  for each row execute function public.teams_check_blacklist();
+
+-- Crée automatiquement le profil quand quelqu'un s'inscrit sur le site (inscription libre, sauf blacklist)
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql security definer
 set search_path = public
 as $$
 begin
+  if public.is_blacklisted(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))) then
+    raise exception 'Ce nom est sur la blacklist du Korin.';
+  end if;
   insert into public.profiles (user_id, username)
   values (new.id, btrim(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))));
   return new;
@@ -168,6 +232,9 @@ begin
     select username into uname from public.profiles where user_id = new.user_id;
     if uname is null then raise exception 'Compte introuvable.'; end if;
     new.bettor := uname;
+    if public.is_blacklisted(uname) then
+      raise exception 'Ce compte est sur la blacklist du Korin : paris interdits.';
+    end if;
     if exists (select 1 from public.bets where match_id = new.match_id and user_id = new.user_id and team_id <> new.team_id) then
       raise exception 'Ce compte a déjà parié sur l''autre équipe de ce combat.';
     end if;
@@ -244,13 +311,49 @@ create policy "lecture publique" on public.matches for select using (true);
 create policy "orgas ecrivent"   on public.matches for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
+-- Paris : chacun ne voit que les siens, la gérance voit tout.
+-- Le public n'a accès qu'aux totaux (fonctions bet_totals et leaderboard plus bas).
 drop policy if exists "lecture publique" on public.bets;
+drop policy if exists "voir ses paris"   on public.bets;
 drop policy if exists "orgas ecrivent"   on public.bets;
-create policy "lecture publique" on public.bets for select using (true);
+create policy "voir ses paris" on public.bets for select to authenticated
+  using (user_id = auth.uid() or public.is_admin());
 create policy "orgas ecrivent"   on public.bets for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
--- Un joueur connecté parie pour lui-même, et peut annuler tant que les paris sont ouverts
+-- Totaux par combat et par équipe (ryos misés, nombre de paris), sans le détail
+create or replace function public.bet_totals()
+returns table (match_id uuid, team_id uuid, n int, total int)
+language sql stable security definer
+set search_path = public
+as $$
+  select match_id, team_id, count(*)::int, coalesce(sum(amount), 0)::int from public.bets group by match_id, team_id;
+$$;
+grant execute on function public.bet_totals() to anon, authenticated;
+
+-- Classement des parieurs (bilan par personne, sans le détail des paris)
+create or replace function public.leaderboard()
+returns table (bettor text, n int, won int, lost int, staked int, returned int, pending int)
+language sql stable security definer
+set search_path = public
+as $$
+  select bettor,
+         count(*)::int,
+         (count(*) filter (where status = 'gagne'))::int,
+         (count(*) filter (where status = 'perdu'))::int,
+         coalesce(sum(amount) filter (where status <> 'en_cours'), 0)::int,
+         coalesce(sum(payout) filter (where status <> 'en_cours'), 0)::int,
+         coalesce(sum(amount) filter (where status = 'en_cours'), 0)::int
+  from public.bets group by bettor;
+$$;
+grant execute on function public.leaderboard() to anon, authenticated;
+
+alter table public.blacklist enable row level security;
+drop policy if exists "gerance gere la blacklist" on public.blacklist;
+create policy "gerance gere la blacklist" on public.blacklist for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- Un joueur connecté (pas blacklisté, vérifié par le trigger) parie pour lui-même, et peut annuler tant que les paris sont ouverts
 drop policy if exists "joueur parie"  on public.bets;
 drop policy if exists "joueur annule" on public.bets;
 create policy "joueur parie" on public.bets for insert to authenticated
@@ -285,6 +388,7 @@ begin
   begin alter publication supabase_realtime add table public.bets;    exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.profiles; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.ledger;   exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.blacklist; exception when duplicate_object then null; end;
 end $$;
 
 -- =============================================================
