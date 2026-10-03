@@ -277,6 +277,8 @@ const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
   : "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c => (c ^ Math.random() * 16 >> c / 4).toString(16));
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Math.round(Number(n) || 0).toLocaleString("fr-FR");
+const fmtSigned = n => (n > 0 ? "+" : n < 0 ? "−" : "") + fmt(Math.abs(n));
+const balCls = n => n > 0 ? "pos" : n < 0 ? "neg" : "mut";
 const fOdds = o => "×" + Number(o).toLocaleString("fr-FR", {minimumFractionDigits:2, maximumFractionDigits:2});
 const now = () => new Date().toISOString();
 const clone = o => JSON.parse(JSON.stringify(o));
@@ -608,7 +610,6 @@ async function addBet({bettor, userId, matchId, teamId, amount}){
     if (!userId || !isAdmin()) userId = backend.user.id;
     const acct = userId === backend.user.id ? S.me : (accountList || []).find(a => a.user_id === userId);
     if (!acct) fail("Compte introuvable.");
-    if (acct.balance < amount) fail(`Solde insuffisant : ${fmt(acct.balance)} ryos disponibles.`);
     bettor = acct.username;
   } else {
     bettor = (bettor || "").trim();
@@ -750,7 +751,7 @@ function gApercu(){
   </div>
   ${backend.mode === "live" ? `<div class="stats">
     <div class="stat"><div class="eyebrow">Comptes inscrits</div><div class="v">${accts.length}</div></div>
-    <div class="stat"><div class="eyebrow">Ryos sur les comptes</div><div class="v">${fmt(accts.reduce((s, a) => s + a.balance, 0))}<small>両</small></div></div>
+    <div class="stat"><div class="eyebrow">Bilan total des joueurs</div><div class="v">${fmt(accts.reduce((s, a) => s + a.balance, 0))}<small>両</small></div></div>
     <div class="stat"><div class="eyebrow">Blacklistés</div><div class="v">${S.blacklist.length}</div></div>
   </div>` : ""}
 
@@ -870,7 +871,7 @@ function betFormHtml(forOthers){
       <datalist id="bf-names">${names.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist></label>`;
   } else if (forOthers){
     who = `<label class="f"><span class="eyebrow">Pour le compte de</span><select id="bf-user">${(accountList || []).filter(a => !isBlacklisted(a.username)).map(a =>
-      `<option value="${a.user_id}"${a.user_id === backend.user.id ? " selected" : ""}>${esc(a.username)} · ${fmt(a.balance)} 両</option>`).join("")}</select></label>`;
+      `<option value="${a.user_id}"${a.user_id === backend.user.id ? " selected" : ""}>${esc(a.username)} · bilan ${fmtSigned(a.balance)} 両</option>`).join("")}</select></label>`;
   }
   return `<form class="form" id="bet-form" data-form="bet">
       ${who}
@@ -890,11 +891,11 @@ function vParis(){
   let form = "";
   if (!live) form = open.length ? `<p class="hint">Mode démo : les paris se saisissent dans Gérance → Paris.</p>` : "";
   else if (!open.length) form = backend.user ? `<section class="sec">${emptyBox("賭", "Aucun combat n'est ouvert aux paris pour le moment.")}</section>` : "";
-  else if (!backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, puis demande des ryos à la gérance. L'inscription est libre et immédiate.</p></div>
+  else if (!backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, et parie tout de suite, sans limite : les ryos se règlent en RP avec la gérance. L'inscription est libre et immédiate.</p></div>
       <button class="btn" data-tab="compte">Se connecter</button></div></section>`;
   else if (S.me && S.me.banned) form = `<section class="sec"><div class="panel danger-zone"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div></section>`;
   else form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
-      <p class="sub">Ton solde : <b class="pos">${fmt(S.me ? S.me.balance : 0)} ryos</b>. La mise est prélevée tout de suite ; tu peux annuler tant que les paris du combat sont ouverts.</p></div></div>
+      <p class="sub">Mise ce que tu veux, il n'y a pas de limite : les ryos se règlent en RP avec la gérance. Ton bilan actuel : <b class="${balCls(S.me ? S.me.balance : 0)}">${fmtSigned(S.me ? S.me.balance : 0)} ryos</b>. Tu peux annuler tant que les paris du combat sont ouverts.</p></div></div>
       ${betFormHtml(false)}</section>`;
   const mine = live && backend.user ? S.bets.filter(b => isMine(b) && b.status === "en_cours") : [];
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">賭</span>Paris</h1>
@@ -988,7 +989,7 @@ function authForm(){
     <label class="f"><span class="eyebrow">Mot de passe</span><input id="lg-pw" type="password" autocomplete="${su ? "new-password" : "current-password"}" required></label>
     ${su ? `<label class="f"><span class="eyebrow">Confirmer le mot de passe</span><input id="lg-pw2" type="password" autocomplete="new-password" required></label>` : ""}
     <button class="btn" type="submit">${su ? "Créer le compte" : "Se connecter"}</button></form>
-    <p class="hint">${su ? "Inscription libre et immédiate, sans validation. Ton prénom et ton nom de personnage, ex. Ryuta Chiiketsu (accents permis). Pas besoin d'e-mail. Ton compte démarre à 0 ryo : la gérance crédite ton solde."
+    <p class="hint">${su ? "Inscription libre et immédiate, sans validation. Ton prénom et ton nom de personnage, ex. Ryuta Chiiketsu (accents permis). Pas besoin d'e-mail. Tu pourras parier tout de suite, sans limite : les ryos se règlent en RP avec la gérance."
       : "Pas de compte ? Clique sur « Créer un compte » : c'est immédiat. Pas besoin de compte pour suivre le tournoi, seulement pour parier."}</p>`;
 }
 
@@ -1000,19 +1001,19 @@ function vCompte(){
   const me = S.me || {username:backend.username, balance:0};
   const mine = S.bets.filter(isMine);
   const dt = s => new Date(s).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
-  return head("Ton solde, tes paris et tous les mouvements de ryos.") + `
+  return head("Ton bilan, tes paris et tous les mouvements de ryos.") + `
     <div class="panel wallet">
-      <div><div class="eyebrow">Solde de ${esc(me.username)}${backend.isAdmin ? " · gérance" : ""}</div><div class="v">${fmt(me.balance)}<small>両</small></div></div>
+      <div><div class="eyebrow">Bilan de ${esc(me.username)}${backend.isAdmin ? " · gérance" : ""}</div><div class="v ${balCls(me.balance)}">${fmtSigned(me.balance)}<small>両</small></div></div>
       <div class="row"><button class="btn" data-tab="paris">Parier</button><button class="btn ghost" data-act="logout">Se déconnecter</button></div>
     </div>
     ${me.banned ? `<div class="panel danger-zone" style="margin-top:12px"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div>` : ""}
-    <p class="hint">Pour recevoir des ryos, adresse-toi à la gérance (famille Chiiketsu). Les gains sont versés automatiquement dès que le vainqueur d'un combat est déclaré.</p>
+    <p class="hint">Ton bilan = tes gains moins tes mises. <b>Négatif</b> : tu dois ces ryos à la gérance. <b>Positif</b> : la gérance te les doit. Tout se règle en RP ; la gérance remet ensuite ton bilan à jour. Les gains sont comptés automatiquement dès que le vainqueur d'un combat est déclaré.</p>
     <section class="sec"><div class="sec-head"><h2>Mes paris · ${mine.length}</h2></div>
     ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Résultat</th><th></th></tr></thead>
       <tbody>${betRows(mine, true)}</tbody></table></div>` : emptyBox("賭", "Tu n'as encore placé aucun pari.")}
     </section>
     <section class="sec"><div class="sec-head"><h2>Mouvements de ryos</h2></div>
-    ${S.ledger.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Motif</th><th class="num">Montant</th><th class="num">Solde</th></tr></thead><tbody>
+    ${S.ledger.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Motif</th><th class="num">Montant</th><th class="num">Bilan</th></tr></thead><tbody>
       ${S.ledger.map(l => `<tr><td class="mut">${dt(l.created_at)}</td><td>${esc(l.reason)}</td>
         <td class="num ${l.delta > 0 ? "pos" : "neg"}">${l.delta > 0 ? "+" : "−"}${fmt(Math.abs(l.delta))}</td><td class="num">${fmt(l.balance_after)}</td></tr>`).join("")}
     </tbody></table></div>` : emptyBox("両", "Aucun mouvement pour l'instant.")}
@@ -1037,12 +1038,12 @@ function vOrga(){
     `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}</button>`).join("")}</div>`;
 
   const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes, ryos et gérants</h2>
-      <p class="sub">Tous les comptes inscrits (l'inscription est libre). Crédite les ryos des joueurs ici. « Nommer gérant » donne tout de suite accès à cet espace : à réserver aux personnes de confiance.</p></div>
+      <p class="sub">Tous les comptes inscrits (l'inscription est libre). Pas de limite pour parier : le bilan est négatif si le joueur doit des ryos, positif si la gérance lui en doit. Quand un joueur règle en RP, utilise Créditer / Retirer pour remettre son bilan à jour. « Nommer gérant » donne tout de suite accès à cet espace : à réserver aux personnes de confiance.</p></div>
       <button class="btn ghost sm" data-act="load-accounts">Actualiser</button></div>
     ${accountList === null ? emptyBox("契", "Clique sur « Actualiser » pour afficher les comptes.")
-      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Inscrit le</th><th class="num">Solde</th><th class="num">Créditer / retirer</th><th>Rôle</th><th></th></tr></thead><tbody>
+      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Inscrit le</th><th class="num">Bilan</th><th class="num">Créditer / retirer</th><th>Rôle</th><th></th></tr></thead><tbody>
         ${accountList.map(a => { const bl = isBlacklisted(a.username); return `<tr><td class="who">${esc(a.username)}</td><td class="mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
-          <td class="num"><b class="pos">${fmt(a.balance)}</b> 両</td>
+          <td class="num"><b class="${balCls(a.balance)}">${fmtSigned(a.balance)}</b> 両</td>
           <td><div class="adj"><input id="adj-${a.user_id}" type="number" min="1" step="1" inputmode="numeric" placeholder="Ryos" aria-label="Montant pour ${esc(a.username)}">
             <button class="btn sm" data-act="adj" data-id="${a.user_id}" data-sign="1">+ Créditer</button>
             <button class="btn ghost sm" data-act="adj" data-id="${a.user_id}" data-sign="-1">− Retirer</button></div></td>
@@ -1174,7 +1175,7 @@ function render(resetForm){
   syncBetForm(resetForm ? null : s.o["bet-team"]);
   const live = backend.mode === "live";
   ORGA_ONLY.forEach(t => document.querySelectorAll(`.tab[data-tab="${t}"]`).forEach(b => { b.hidden = !canSee(t); }));
-  $("tab-compte").textContent = !live ? "Compte" : backend.user ? (S.me ? fmt(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
+  $("tab-compte").textContent = !live ? "Compte" : backend.user ? (S.me ? fmtSigned(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
   document.querySelectorAll(".tab").forEach(b => { if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
 }
 

@@ -150,8 +150,9 @@ as $$
 $$;
 
 -- =============================================================
---  Porte-monnaie en ryos : chaque compte a un solde, chaque
---  mouvement est noté dans le registre. Le solde ne change QUE
+--  Bilan en ryos : chaque compte a un solde (bilan, peut être négatif),
+--  chaque mouvement est noté dans le registre. Pas de limite pour parier :
+--  les ryos se règlent en RP avec la gérance. Le solde ne change QUE
 --  par les fonctions ci-dessous (personne ne peut l'éditer à la main).
 -- =============================================================
 alter table public.profiles add column if not exists balance int not null default 0;
@@ -201,7 +202,7 @@ begin
   if not public.is_admin() then raise exception 'Réservé aux organisateurs.'; end if;
   if coalesce(p_delta, 0) = 0 then raise exception 'Indique un montant.'; end if;
   return public.move_ryos(p_user, p_delta,
-    coalesce(nullif(trim(p_reason), ''), case when p_delta > 0 then 'Crédit des organisateurs' else 'Retrait des organisateurs' end));
+    coalesce(nullif(trim(p_reason), ''), case when p_delta > 0 then 'Crédit de la gérance' else 'Retrait de la gérance' end), null, true);
 end;
 $$;
 revoke execute on function public.adjust_ryos(uuid, int, text) from public, anon;
@@ -238,7 +239,8 @@ begin
     if exists (select 1 from public.bets where match_id = new.match_id and user_id = new.user_id and team_id <> new.team_id) then
       raise exception 'Ce compte a déjà parié sur l''autre équipe de ce combat.';
     end if;
-    perform public.move_ryos(new.user_id, -new.amount, 'Mise sur un combat', new.id);
+    -- Pas de limite de solde : le solde est un bilan qui peut être négatif, les ryos se règlent en RP
+    perform public.move_ryos(new.user_id, -new.amount, 'Mise sur un combat', new.id, true);
   end if;
   return new;
 end;
