@@ -638,25 +638,13 @@ function vAccueil(){
   const open = S.matches.filter(m => m.status === "ouvert");
   const done = S.matches.filter(m => m.status === "termine" && !m.bye).sort((a, b) => (b.decided_at || "").localeCompare(a.decided_at || "")).slice(0, 4);
   const c = champion();
-  const banner = `<span class="vk">砂隠れの里</span><span class="bn">SUNA</span><span class="lz"><span>風</span></span>`;
   return `
-  <section class="hero">
-    <div class="banner l" aria-hidden="true">${banner}</div>
-    <div class="banner r" aria-hidden="true">${banner}</div>
-    <span class="wm wm-1" aria-hidden="true">契</span><span class="wm wm-2" aria-hidden="true">風砂</span>
-    <div class="hero-core">
-      <div class="seal" aria-hidden="true"><div>血契</div></div>
-      <h1 class="wordmark">Korin</h1>
-      <div class="rule"><span class="dia">◇</span>Nouvelle édition<span class="dia">◇</span></div>
-      <p class="triad"><span>Gloire</span><span class="dia">◇</span><span>Ryos</span><span class="dia">◇</span><span>Honneur</span></p>
-      <p class="motto">« Le sable ne pardonne pas. »</p>
-      <div class="frame"><p>Organisé par la famille Chiiketsu</p><p>À la 23ᵉ Lune</p></div>
-      ${c ? `<div class="champ-banner"><span class="eyebrow">Champions du Korin</span><strong>${esc(c.name)}</strong></div>`
-          : `<div class="dice">${die(6)}<span class="dia">◇</span>${die(5)}<span class="dia">◇</span>${die(1)}</div>`}
-      <p class="tagline">Un système de paris inédit<br>Plus les risques sont grands, plus les gains sont énormes</p>
-    </div>
-  </section>
-
+  <div class="sec-head"><div>
+    <h1 class="pt"><span class="k">砂</span>Korin de Suna</h1>
+    <p class="sub">Tournoi en 2 contre 2 organisé par la famille Chiiketsu. Suis le tableau, les paris et le classement en direct.</p>
+  </div></div>
+  ${c ? `<div class="panel" style="text-align:center;border-color:var(--gold)"><span class="eyebrow">Champions du Korin</span>
+    <div class="crown" style="border:0;background:none;padding:6px 0 0"><strong>${esc(c.name)}</strong><span>${esc(c.player1)} & ${esc(c.player2)}</span></div></div>` : ""}
   <div class="stats">
     <div class="stat"><div class="eyebrow">Équipes en course</div><div class="v">${live}<small>sur ${S.teams.length}</small></div></div>
     <div class="stat"><div class="eyebrow">Paris en cours</div><div class="v">${pend.length}</div></div>
