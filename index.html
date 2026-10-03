@@ -1063,13 +1063,20 @@ function updateGain(){
   g.innerHTML = `Gain possible : <b>${fmt(amt * o)} ryos</b> (mise de ${fmt(amt)}, cote ${fOdds(o)})`;
 }
 
+/* Le public et les joueurs ne voient que Tableau, Équipes, Paris, Classement et leur compte.
+   Accueil, Historique et Orga sont réservés à la gérance (simple masquage : les données restent publiques en lecture). */
+const ORGA_ONLY = ["accueil", "historique", "orga"];
+const canSee = t => !(backend.mode === "live" && !backend.isAdmin && ORGA_ONLY.includes(t));
+
 function render(resetForm){
+  if (!canSee(tab)){ tab = "tableau"; try { history.replaceState(null, "", "#tableau"); } catch(e){} resetForm = true; }
   const s = snapshot();
   view.innerHTML = VIEWS[tab]();
   if (!resetForm) restore(s);
   syncBetForm(resetForm ? null : s.o["bet-team"]);
   const live = backend.mode === "live";
-  $("tab-orga").hidden = live && !backend.isAdmin;
+  ORGA_ONLY.forEach(t => document.querySelectorAll(`.tab[data-tab="${t}"]`).forEach(b => { b.hidden = !canSee(t); }));
+  document.querySelector(".brand").dataset.tab = canSee("accueil") ? "accueil" : "tableau";
   $("tab-compte").textContent = !live ? "Compte" : backend.user ? (S.me ? fmt(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
   document.querySelectorAll(".tab").forEach(b => { if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
 }
