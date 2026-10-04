@@ -678,12 +678,13 @@ async function addBet({bettor, userId, matchId, teamId, amount}){
 }
 
 const isMine = b => !!(backend && backend.user && b.user_id === backend.user.id);
-const canCancel = b => b.status === "en_cours" && (isAdmin() || (isMine(b) && (matchById(b.match_id) || {}).status === "ouvert"));
+/* Un pari placé est définitif pour le joueur ; seule la gérance peut l'annuler (mise rendue) */
+const canCancel = b => b.status === "en_cours" && isAdmin();
 
 async function deleteBet(id){
   const b = S.bets.find(x => x.id === id); if (!b) fail("Pari introuvable.");
   if (b.status !== "en_cours") fail("Un pari déjà réglé ne peut plus être retiré.");
-  if (!canCancel(b)) fail("Les paris sont fermés : ce pari ne peut plus être annulé.");
+  if (!canCancel(b)) fail("Un pari placé ne peut plus être retiré.");
   await backend.remove("bets", id);
   await reload();
 }
@@ -1048,15 +1049,15 @@ function vParis(){
       <button class="btn" data-tab="compte">Se connecter</button></div></section>`;
   else if (S.me && S.me.banned) form = `<section class="sec"><div class="panel danger-zone"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div></section>`;
   else form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
-      <p class="sub">Mise ce que tu veux, il n'y a pas de limite : les ryos se règlent en RP avec la gérance. Ton bilan actuel : <b class="${balCls(S.me ? S.me.balance : 0)}">${fmtSigned(S.me ? S.me.balance : 0)} ryos</b>. Tu peux annuler tant que les paris du combat sont ouverts.</p></div></div>
+      <p class="sub">Mise ce que tu veux, il n'y a pas de limite : les ryos se règlent en RP avec la gérance. Ton bilan actuel : <b class="${balCls(S.me ? S.me.balance : 0)}">${fmtSigned(S.me ? S.me.balance : 0)} ryos</b>. Attention : un pari placé est définitif, il ne peut plus être retiré.</p></div></div>
       ${betFormHtml(false)}</section>`;
   const mine = live && backend.user ? S.bets.filter(b => isMine(b) && b.status === "en_cours") : [];
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">賭</span>Paris</h1>
       <p class="sub">La cote est fixée par la gérance et gelée au moment du pari. Si l'équipe choisie gagne, le parieur reçoit sa mise multipliée par la cote.</p></div></div>
     ${form}
     ${mine.length ? `<section class="sec"><div class="sec-head"><h2>Mes paris en cours · ${mine.length}</h2></div>
-      <div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th><th></th></tr></thead>
-      <tbody>${betRows(mine, true)}</tbody></table></div></section>` : ""}
+      <div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th></tr></thead>
+      <tbody>${betRows(mine, false)}</tbody></table></div></section>` : ""}
     <section class="sec"><div class="sec-head"><h2>Ouverts aux paris · ${open.length}</h2></div>
       ${open.length ? `<div class="duels">${open.map(duel).join("")}</div>` : emptyBox("賭", "Aucun combat ouvert pour le moment.")}</section>
     ${closed.length ? `<section class="sec"><div class="sec-head"><h2>Paris fermés, combat en attente · ${closed.length}</h2></div><div class="duels">${closed.map(duel).join("")}</div></section>` : ""}`;
@@ -1071,7 +1072,7 @@ function gParis(){
       ${live ? `<p class="sub">La mise est prélevée sur le solde du joueur choisi, le gain lui sera versé automatiquement.</p>` : ""}</div></div>
       ${open.length ? betFormHtml(true) : emptyBox("賭", "Aucun combat n'est ouvert : ouvre les paris d'un combat dans Gérance → Combats.")}</section>
     <section class="sec"><div class="sec-head"><div><h2>Tous les paris en cours · ${pend.length}</h2>
-      <p class="sub">Les joueurs ne voient que leurs propres paris. Annuler un pari rend la mise au joueur.</p></div></div>
+      <p class="sub">Les joueurs ne voient que leurs propres paris et ne peuvent pas les retirer. Seule la gérance peut annuler un pari (en cas d'erreur) : la mise est rendue au joueur.</p></div></div>
       ${pend.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Gain</th><th></th></tr></thead>
         <tbody>${betRows(pend, true)}</tbody></table></div>` : emptyBox("両", "Aucun pari en attente de résultat.")}</section>`;
 }
@@ -1253,8 +1254,8 @@ function vCompte(){
     ${me.banned ? `<div class="panel danger-zone" style="margin-top:12px"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div>` : ""}
     <p class="hint">Ton bilan = tes gains moins tes mises. <b>Négatif</b> : tu dois ces ryos à la gérance. <b>Positif</b> : la gérance te les doit. Tout se règle en RP ; la gérance remet ensuite ton bilan à jour. Les gains sont comptés automatiquement dès que le vainqueur d'un combat est déclaré.</p>
     <section class="sec"><div class="sec-head"><h2>Mes paris · ${mine.length}</h2></div>
-    ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Résultat</th><th></th></tr></thead>
-      <tbody>${betRows(mine, true)}</tbody></table></div>` : emptyBox("賭", "Tu n'as encore placé aucun pari.")}
+    ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Parieur</th><th>Combat</th><th>Choix</th><th class="num">Mise</th><th class="num">Cote</th><th class="num">Résultat</th></tr></thead>
+      <tbody>${betRows(mine, false)}</tbody></table></div>` : emptyBox("賭", "Tu n'as encore placé aucun pari.")}
     </section>
     <section class="sec"><div class="sec-head"><h2>Mouvements de ryos</h2></div>
     ${S.ledger.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Motif</th><th class="num">Montant</th><th class="num">Bilan</th></tr></thead><tbody>
@@ -1592,7 +1593,7 @@ init();
 /* ---------- Mise à jour automatique ----------
    GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
    avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
-const APP_VERSION = "2026-10-04.2";
+const APP_VERSION = "2026-10-04.3";
 let updateShown = false;
 async function checkUpdate(){
   if (updateShown) return;

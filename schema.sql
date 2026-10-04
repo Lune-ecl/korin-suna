@@ -443,14 +443,12 @@ drop policy if exists "gerance gere la blacklist" on public.blacklist;
 create policy "gerance gere la blacklist" on public.blacklist for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
--- Un joueur connecté (pas blacklisté, vérifié par le trigger) parie pour lui-même, et peut annuler tant que les paris sont ouverts
+-- Un joueur connecté (pas blacklisté, vérifié par le trigger) parie pour lui-même.
+-- Un pari placé est définitif : le joueur ne peut pas le retirer (seule la gérance peut l'annuler).
 drop policy if exists "joueur parie"  on public.bets;
 drop policy if exists "joueur annule" on public.bets;
 create policy "joueur parie" on public.bets for insert to authenticated
   with check (user_id = auth.uid());
-create policy "joueur annule" on public.bets for delete to authenticated
-  using (user_id = auth.uid() and status = 'en_cours'
-         and exists (select 1 from public.matches m where m.id = match_id and m.status = 'ouvert'));
 
 alter table public.ledger enable row level security;
 drop policy if exists "voir ses mouvements" on public.ledger;
