@@ -352,13 +352,14 @@ function supaBackend(){
     /* Les paris détaillés ne reviennent que pour soi (ou tous pour la gérance) ;
        les totaux et le classement passent par des fonctions qui ne donnent que des sommes. */
     async load(){
-      const [t, m, b, tot, lb, ed] = await Promise.all([
+      const [t, m, b, tot, lb, ed, res] = await Promise.all([
         sb.from("teams").select("*").order("created_at"),
         sb.from("matches").select("*").order("round").order("slot"),
         sb.from("bets").select("*").order("created_at", {ascending:false}),
         sb.rpc("bet_totals"),
         sb.rpc("leaderboard"),
-        sb.from("editions").select("*").order("starts_at")
+        sb.from("editions").select("*").order("starts_at"),
+        sb.rpc("korin_results")
       ]);
       [t, m, b].forEach(chk);
       const soft = r => r.error ? null : r.data;   // fonctions absentes si schema.sql n'est pas à jour : on retombe sur un calcul local
@@ -376,7 +377,7 @@ function supaBackend(){
         if (this.isAdmin) blacklist = soft(await sb.from("blacklist").select("*").order("name")) || [];
       }
       const board = soft(lb) && lb.data.map(o => ({name:o.bettor, n:o.n, won:o.won, lost:o.lost, staked:o.staked, returned:o.returned, pending:o.pending}));
-      return {teams:t.data, matches:m.data, bets:b.data, totals:soft(tot), board, me, ledger, blacklist, editions};
+      return {teams:t.data, matches:m.data, bets:b.data, totals:soft(tot), board, me, ledger, blacklist, editions, results:soft(res)};
     },
     async nameBlacklisted(name){ const r = await sb.rpc("is_blacklisted", {p_name:name}); return !r.error && !!r.data; },
     async adjust(userId, delta){ chk(await sb.rpc("adjust_ryos", {p_user:userId, p_delta:delta, p_reason:null})); },
@@ -461,6 +462,7 @@ async function reload(){
   S.teams = S.allTeams.filter(x => x.edition_id === cid);
   S.matches = S.allMatches.filter(x => x.edition_id === cid);
   S.bets = S.allBets.filter(x => x.edition_id === cid);
+  if (!S.results) S.results = computeResults();
   S.totals.forEach(x => { x.n = Number(x.n); x.total = Number(x.total); });
   S.board = S.board.map(o => ({...o, net:Number(o.returned) - Number(o.staked)}))
     .sort((a, b) => b.net - a.net || b.returned - a.returned || a.name.localeCompare(b.name, "fr"));
@@ -476,6 +478,54 @@ function computeTotals(bets){
   }
   return [...map.values()];
 }
+/* Mode démo : mêmes lignes que public.korin_results() (une par équipe et par Korin ouvert ou terminé) */
+function computeResults(){
+  const out = [];
+  for (const e of S.editions.filter(e => e.ended_at || Date.parse(e.starts_at) <= Date.now())){
+    const ms = S.allMatches.filter(m => m.edition_id === e.id);
+    const R = ms.reduce((a, m) => Math.max(a, m.round), 0);
+    const fin = ms.find(m => m.round === R && m.slot === 0);
+    for (const t of S.allTeams.filter(x => x.edition_id === e.id)){
+      const mine = ms.filter(m => m.team_a === t.id || m.team_b === t.id);
+      out.push({edition_id:e.id, edition_name:e.name, starts_at:e.starts_at, ended_at:e.ended_at, team:t.name, player1:t.player1, player2:t.player2,
+        wins:ms.filter(m => m.winner === t.id && !m.bye).length,
+        losses:mine.filter(m => m.status === "termine" && m.winner && m.winner !== t.id).length,
+        reached:mine.reduce((a, m) => Math.max(a, m.round), 0), rounds:R,
+        champion:!!(fin && fin.winner === t.id), finalist:!!(fin && (fin.team_a === t.id || fin.team_b === t.id))});
+    }
+  }
+  return out;
+}
+
+/* Classement des combattants ou des équipes, tous Korin confondus.
+   Ordre : titres, finales, victoires, moins de défaites. */
+function rankParticipants(kind){
+  const map = new Map();
+  for (const r of S.results){
+    const names = kind === "team" ? [r.team] : [r.player1, r.player2];
+    for (const name of names){
+      const k = nameKey(name); if (!k) continue;
+      if (!map.has(k)) map.set(k, {name, korins:0, titles:0, finals:0, wins:0, losses:0, best:null, last:null});
+      const o = map.get(k);
+      o.korins++; o.wins += r.wins; o.losses += r.losses;
+      if (r.champion) o.titles++;
+      if (r.finalist) o.finals++;
+      const score = r.champion ? 1000 : r.reached * 10 - r.rounds;   // pour garder le meilleur parcours
+      if (!o.best || score > o.best.score) o.best = {score, r};
+      if (!o.last || String(r.starts_at) > String(o.last.starts_at)){ o.last = r; o.name = name; }
+    }
+  }
+  return [...map.values()].sort((a, b) => b.titles - a.titles || b.finals - a.finals || b.wins - a.wins || a.losses - b.losses || a.name.localeCompare(b.name, "fr"));
+}
+/* Libellé d'un parcours : Champion, Finaliste, Demi-finale, En course… */
+function runLabel(r){
+  if (r.champion) return '<span class="pill p-champ">Champion</span>';
+  if (!r.ended_at && r.losses === 0) return '<span class="pill p-in">En course</span>';
+  if (r.finalist) return '<span class="pill p-open">Finaliste</span>';
+  const d = r.rounds - r.reached;
+  return `<span class="pill p-done">${["Finale", "Demi-finale", "Quart de finale", "Huitième de finale", "Seizième de finale"][d] || (r.reached ? "Tour " + r.reached : "Inscrite")}</span>`;
+}
+
 function computeBoard(bets){
   const map = new Map();
   for (const b of bets){
@@ -536,8 +586,6 @@ function teamStatus(id){
   const reached = Math.max(0, ...S.matches.filter(m => m.team_a === id || m.team_b === id).map(m => m.round));
   return {key:"in", label:"En course", rank:reached + 0.5};
 }
-
-const bettors = () => S.board;
 
 /* ---------- Actions de la gérance ---------- */
 async function addTeam({name, p1, p2}){
@@ -1105,22 +1153,51 @@ function rankTable(list){
     </tbody></table></div>` : emptyBox("番", "Aucun pari enregistré.");
 }
 
+/* Classement public : palmarès, combattants et équipes de tous les Korin (pas de paris ici) */
 function vClassement(){
-  const list = bettors();
+  const kj = ["壱", "弐", "参"];
+  const rk = i => `<td class="rank ${i < 3 ? "" : "n"}">${i < 3 ? kj[i] : i + 1}</td>`;
+  const best = o => o.best ? `${runLabel(o.best.r)} <span class="mut" style="font-size:12.5px">${esc(o.best.r.edition_name)}</span>` : "—";
+  const titles = n => n ? `<b class="pos">${n}</b>` : '<span class="mut">0</span>';
+  const fighters = rankParticipants("player"), teams = rankParticipants("team");
+  const palmares = S.editions.slice().reverse()
+    .map(e => ({e, c:S.results.find(r => r.edition_id === e.id && r.champion)})).filter(x => x.c);
   const teamsRanked = korinOpen() ? S.teams.slice().sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank || a.name.localeCompare(b.name, "fr")) : [];
-  return `${korinBanner()}<div class="sec-head"><div><h1 class="pt"><span class="k">番</span>Classement général</h1>
-      <p class="sub">Tous les Korin confondus. Les parieurs sont classés par bilan net : ce qu'ils ont gagné moins ce qu'ils ont misé sur les combats terminés.</p></div></div>
-    <section class="sec"><div class="sec-head"><h2>Parieurs</h2></div>
-    ${rankTable(list)}
-    </section>
-    ${!korinOpen() ? "" : `<section class="sec"><div class="sec-head"><h2>Équipes · ${esc(S.cur.name)}</h2></div>
+
+  return `${korinBanner()}<div class="sec-head"><div><h1 class="pt"><span class="k">番</span>Classement</h1>
+      <p class="sub">Les combattants et les équipes de tous les Korin : titres, finales, combats gagnés et perdus. Classés par titres, puis finales, puis victoires.</p></div></div>
+
+    ${!korinOpen() ? "" : `<section class="sec"><div class="sec-head"><h2><span class="k">闘</span>${esc(S.cur.name)} · en cours</h2></div>
     ${teamsRanked.length ? `<div class="tbl-wrap"><table><thead><tr><th></th><th>Équipe</th><th>Combattants</th><th>Parcours</th></tr></thead><tbody>
       ${teamsRanked.map((t, i) => { const st = teamStatus(t.id); return `<tr>
         <td class="rank n">${i + 1}</td><td class="who">${esc(t.name)}</td><td class="mut">${esc(t.player1)} & ${esc(t.player2)}</td>
         <td>${st.key === "champ" ? '<span class="pill p-champ">Championne</span>' : st.key === "in" ? `<span class="pill p-in">En course · ${esc(roundName(Math.floor(st.rank)))}</span>` : st.key === "out" ? `<span class="pill p-done">${esc(st.label)}</span>` : '<span class="pill p-wait">Inscrite</span>'}</td>
       </tr>`; }).join("")}
     </tbody></table></div>` : emptyBox("組", "Aucune équipe inscrite.")}
-    </section>`}`;
+    </section>`}
+
+    <section class="sec"><div class="sec-head"><h2><span class="k">頂</span>Palmarès · ${palmares.length}</h2></div>
+    ${palmares.length ? `<div class="teams">${palmares.map(({e, c}) => `<div class="team">
+        <span class="eyebrow">${esc(e.name)} · ${fDay(e.ended_at || e.starts_at)}</span>
+        <div class="nm">${esc(c.team)}</div>
+        <div class="pl">${esc(c.player1)}<em>×</em>${esc(c.player2)}</div>
+        <div class="team-foot"><span class="pill p-champ">Champions</span><span class="mut" style="font-size:13px">${plural(c.wins, "victoire")}</span></div>
+      </div>`).join("")}</div>` : emptyBox("頂", "Aucun Korin n'a encore de champions.")}
+    </section>
+
+    <section class="sec"><div class="sec-head"><h2><span class="k">人</span>Combattants · ${fighters.length}</h2></div>
+    ${fighters.length ? `<div class="tbl-wrap"><table><thead><tr><th></th><th>Combattant</th><th class="num">Korin joués</th><th class="num">Titres</th><th class="num">Finales</th><th class="num">Victoires</th><th class="num">Défaites</th><th>Meilleur résultat</th></tr></thead><tbody>
+      ${fighters.map((o, i) => `<tr>${rk(i)}<td class="who">${esc(o.name)}</td><td class="num">${o.korins}</td><td class="num">${titles(o.titles)}</td>
+        <td class="num">${o.finals}</td><td class="num">${o.wins}</td><td class="num">${o.losses}</td><td>${best(o)}</td></tr>`).join("")}
+    </tbody></table></div>` : emptyBox("人", "Aucun combat joué pour l'instant.")}
+    </section>
+
+    <section class="sec"><div class="sec-head"><h2><span class="k">組</span>Équipes · ${teams.length}</h2></div>
+    ${teams.length ? `<div class="tbl-wrap"><table><thead><tr><th></th><th>Équipe</th><th>Combattants</th><th class="num">Korin joués</th><th class="num">Titres</th><th class="num">Finales</th><th class="num">Victoires</th><th class="num">Défaites</th><th>Meilleur résultat</th></tr></thead><tbody>
+      ${teams.map((o, i) => `<tr>${rk(i)}<td class="who">${esc(o.name)}</td><td class="mut">${esc(o.last.player1)} & ${esc(o.last.player2)}</td><td class="num">${o.korins}</td>
+        <td class="num">${titles(o.titles)}</td><td class="num">${o.finals}</td><td class="num">${o.wins}</td><td class="num">${o.losses}</td><td>${best(o)}</td></tr>`).join("")}
+    </tbody></table></div>` : emptyBox("組", "Aucune équipe pour l'instant.")}
+    </section>`;
 }
 
 /* Gérance → Historique : la liste de tous les Korin, ou le détail complet de l'un d'eux */
@@ -1163,9 +1240,13 @@ function histList(){
         <td>${st.champ ? `<b class="pos">${esc(st.champ.name)}</b>` : '<span class="mut">—</span>'}</td>
         <td class="num">${st.teams.length}</td><td class="num">${st.played}</td><td class="num">${st.bets.length}</td>
         <td class="num">${fmt(st.staked)}</td><td class="num">${fmt(st.paid)}</td><td class="num ${balCls(st.house)}"><b>${fmtSigned(st.house)}</b></td>
-        <td class="num"><button class="btn ghost sm" data-act="hist-ed" data-id="${e.id}">Voir</button></td></tr>`).join("")}
+        <td class="num"><div class="adj"><button class="btn ghost sm" data-act="hist-ed" data-id="${e.id}">Voir</button>
+          ${e.ended_at ? `<button class="btn danger sm" data-act="ed-del" data-id="${e.id}" data-confirm="Confirmer">Supprimer</button>` : ""}</div></td></tr>`).join("")}
     </tbody></table></div>
-    <p class="hint">« Gérance » = total misé moins total versé aux gagnants, sur les paris réglés. Positif : la gérance a gagné des ryos.</p></section>`;
+    <p class="hint">« Gérance » = total misé moins total versé aux gagnants, sur les paris réglés. Positif : la gérance a gagné des ryos.</p></section>
+  <section class="sec"><div class="sec-head"><div><h2><span class="k">番</span>Classement des parieurs · tous les Korin</h2>
+      <p class="sub">Réservé à la gérance. Classés par bilan net : gains moins mises, sur les combats terminés.</p></div></div>
+    ${rankTable(S.board)}</section>`;
 }
 function histDetail(e){
   const st = editionStats(e.id);
@@ -1593,7 +1674,7 @@ init();
 /* ---------- Mise à jour automatique ----------
    GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
    avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
-const APP_VERSION = "2026-10-04.3";
+const APP_VERSION = "2026-10-04.4";
 let updateShown = false;
 async function checkUpdate(){
   if (updateShown) return;

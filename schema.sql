@@ -438,6 +438,29 @@ as $$
 $$;
 grant execute on function public.leaderboard() to anon, authenticated;
 
+-- Résultats des équipes de chaque Korin ouvert ou terminé (pour le classement public des combattants et des équipes).
+-- Ne donne que les résultats sportifs : ni paris, ni Korin encore secret (pas ouvert).
+create or replace function public.korin_results()
+returns table (edition_id uuid, edition_name text, starts_at timestamptz, ended_at timestamptz,
+               team text, player1 text, player2 text, wins int, losses int, reached int, rounds int,
+               champion boolean, finalist boolean)
+language sql stable security definer
+set search_path = public
+as $$
+  with ed as (select * from public.editions e where e.ended_at is not null or e.starts_at <= now()),
+       r  as (select m.edition_id, max(m.round) as rounds from public.matches m group by m.edition_id)
+  select e.id, e.name, e.starts_at, e.ended_at, t.name, t.player1, t.player2,
+    (select count(*) from public.matches m where m.edition_id = e.id and m.winner = t.id and not m.bye)::int,
+    (select count(*) from public.matches m where m.edition_id = e.id and m.status = 'termine' and m.winner is not null
+       and m.winner <> t.id and (m.team_a = t.id or m.team_b = t.id))::int,
+    coalesce((select max(m.round) from public.matches m where m.edition_id = e.id and (m.team_a = t.id or m.team_b = t.id)), 0)::int,
+    coalesce(r.rounds, 0)::int,
+    exists (select 1 from public.matches m where m.edition_id = e.id and m.round = r.rounds and m.slot = 0 and m.winner = t.id),
+    exists (select 1 from public.matches m where m.edition_id = e.id and m.round = r.rounds and m.slot = 0 and (m.team_a = t.id or m.team_b = t.id))
+  from ed e join public.teams t on t.edition_id = e.id left join r on r.edition_id = e.id;
+$$;
+grant execute on function public.korin_results() to anon, authenticated;
+
 alter table public.blacklist enable row level security;
 drop policy if exists "gerance gere la blacklist" on public.blacklist;
 create policy "gerance gere la blacklist" on public.blacklist for all to authenticated
