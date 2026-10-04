@@ -208,6 +208,44 @@ $$;
 revoke execute on function public.adjust_ryos(uuid, int, text) from public, anon;
 grant  execute on function public.adjust_ryos(uuid, int, text) to authenticated;
 
+-- =============================================================
+--  Gestion des comptes par la gérance (pas d'e-mail, donc pas de
+--  « mot de passe oublié » automatique : la gérance en donne un nouveau)
+-- =============================================================
+create extension if not exists pgcrypto with schema extensions;
+
+create or replace function public.admin_set_password(p_user uuid, p_password text)
+returns void
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+begin
+  if not public.is_admin() then raise exception 'Réservé à la gérance.'; end if;
+  if char_length(coalesce(p_password, '')) < 6 then raise exception 'Le mot de passe doit faire au moins 6 caractères.'; end if;
+  update auth.users set encrypted_password = extensions.crypt(p_password, extensions.gen_salt('bf')), updated_at = now()
+    where id = p_user;
+  if not found then raise exception 'Compte introuvable.'; end if;
+end;
+$$;
+revoke execute on function public.admin_set_password(uuid, text) from public, anon;
+grant  execute on function public.admin_set_password(uuid, text) to authenticated;
+
+-- Supprime un compte (profil, rôle et registre partent avec ; ses paris restent, sans lien au compte)
+create or replace function public.admin_delete_user(p_user uuid)
+returns void
+language plpgsql security definer
+set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception 'Réservé à la gérance.'; end if;
+  if p_user = auth.uid() then raise exception 'Tu ne peux pas supprimer ton propre compte.'; end if;
+  delete from auth.users where id = p_user;
+  if not found then raise exception 'Compte introuvable.'; end if;
+end;
+$$;
+revoke execute on function public.admin_delete_user(uuid) from public, anon;
+grant  execute on function public.admin_delete_user(uuid) to authenticated;
+
 -- Nouveau pari : vérifie le combat, gèle la cote, prélève la mise
 create or replace function public.bets_before_insert()
 returns trigger

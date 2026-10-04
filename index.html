@@ -305,6 +305,7 @@ let accountList = null;
 let S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[]};
 let backend = null;
 let histQ = "";
+let acctQ = "", selAcct = "";   // Gérance → Comptes : recherche et compte ouvert dans le panneau « Gérer »
 
 /* ---------- Stockage : mode démo (ce navigateur) ---------- */
 function demoBackend(){
@@ -412,6 +413,14 @@ function supaBackend(){
       if (userId === this.user.id && !on) fail("Tu ne peux pas te retirer toi-même de la gérance.");
       if (on) chk(await sb.from("admins").insert([{user_id:userId}]));
       else chk(await sb.from("admins").delete().eq("user_id", userId));
+    },
+    async setPassword(userId, pw){
+      if (String(pw || "").length < 6) fail("Le mot de passe doit faire au moins 6 caractères.");
+      chk(await sb.rpc("admin_set_password", {p_user:userId, p_password:pw}));
+    },
+    async deleteUser(userId){
+      if (userId === this.user.id) fail("Tu ne peux pas supprimer ton propre compte.");
+      chk(await sb.rpc("admin_delete_user", {p_user:userId}));
     },
     async logout(){ await sb.auth.signOut(); this.user = null; this.isAdmin = false; this.username = ""; },
     subscribe(cb){
@@ -1037,23 +1046,59 @@ function vOrga(){
   const nav = `<div class="row" role="tablist" aria-label="Sections de la gérance">${tabs.map(([k, l]) =>
     `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}</button>`).join("")}</div>`;
 
-  const accounts = backend.mode !== "live" ? "" : `<section class="sec"><div class="sec-head"><div><h2>Comptes, ryos et gérants</h2>
-      <p class="sub">Tous les comptes inscrits (l'inscription est libre). Pas de limite pour parier : le bilan est négatif si le joueur doit des ryos, positif si la gérance lui en doit. Quand un joueur règle en RP, utilise Créditer / Retirer pour remettre son bilan à jour. « Nommer gérant » donne tout de suite accès à cet espace : à réserver aux personnes de confiance.</p></div>
-      <button class="btn ghost sm" data-act="load-accounts">Actualiser</button></div>
-    ${accountList === null ? emptyBox("契", "Clique sur « Actualiser » pour afficher les comptes.")
-      : accountList.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Inscrit le</th><th class="num">Bilan</th><th class="num">Créditer / retirer</th><th>Rôle</th><th></th></tr></thead><tbody>
-        ${accountList.map(a => { const bl = isBlacklisted(a.username); return `<tr><td class="who">${esc(a.username)}</td><td class="mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
-          <td class="num"><b class="${balCls(a.balance)}">${fmtSigned(a.balance)}</b> 両</td>
-          <td><div class="adj"><input id="adj-${a.user_id}" type="number" min="1" step="1" inputmode="numeric" placeholder="Ryos" aria-label="Montant pour ${esc(a.username)}">
-            <button class="btn sm" data-act="adj" data-id="${a.user_id}" data-sign="1">+ Créditer</button>
-            <button class="btn ghost sm" data-act="adj" data-id="${a.user_id}" data-sign="-1">− Retirer</button></div></td>
-          <td>${a.orga ? '<span class="pill p-open">Gérant</span>' : bl ? '<span class="pill p-closed">Blacklisté</span>' : '<span class="pill p-wait">Joueur</span>'}</td>
-          <td class="num"><div class="adj">${a.user_id === backend.user.id ? '<span class="mut">Toi</span>' : a.orga
-            ? `<button class="btn danger sm" data-act="orga" data-id="${a.user_id}" data-on="0" data-confirm="Confirmer">Retirer de la gérance</button>`
-            : `<button class="btn sm" data-act="orga" data-id="${a.user_id}" data-on="1">Nommer gérant</button>
-               ${bl ? "" : `<button class="btn danger sm" data-act="bl-acct" data-name="${esc(a.username)}" data-confirm="Confirmer">Blacklister</button>`}`}</div></td></tr>`; }).join("")}
-        </tbody></table></div>` : emptyBox("契", "Aucun compte pour l'instant.")}
+  const accounts = backend.mode !== "live" ? "" : (() => {
+    if (accountList === null) return `<section class="sec">${emptyBox("契", "Chargement des comptes…")}<p class="hint"><button class="btn ghost sm" data-act="load-accounts">Actualiser</button></p></section>`;
+    const role = a => a.orga ? '<span class="pill p-open">Gérant</span>' : isBlacklisted(a.username) ? '<span class="pill p-closed">Blacklisté</span>' : '<span class="pill p-wait">Joueur</span>';
+    const gerants = accountList.filter(a => a.orga);
+    const candidats = accountList.filter(a => !a.orga && !isBlacklisted(a.username));
+    const sel = accountList.find(a => a.user_id === selAcct);
+    const q = nameKey(acctQ);
+    const list = accountList.filter(a => !q || nameKey(a.username).includes(q));
+
+    /* Panneau de gestion du compte choisi */
+    const panel = !sel ? "" : (() => {
+      const me = sel.user_id === backend.user.id, bl = isBlacklisted(sel.username);
+      return `<section class="sec"><div class="panel" style="border-color:var(--gold)">
+        <div class="sec-head" style="margin-bottom:12px"><div><span class="eyebrow">Gérer le compte</span><h2 style="margin-top:4px">${esc(sel.username)} ${role(sel)}</h2>
+          <p class="sub">Inscrit le ${new Date(sel.created_at).toLocaleDateString("fr-FR")} · bilan <b class="${balCls(sel.balance)}">${fmtSigned(sel.balance)} 両</b></p></div>
+          <button class="btn ghost sm" data-act="acct-sel" data-id="">Fermer</button></div>
+        <p class="eyebrow" style="margin:0 0 6px">Bilan en ryos (après un règlement en RP)</p>
+        <div class="adj" style="justify-content:flex-start;margin-bottom:16px"><input id="adj-${sel.user_id}" type="number" min="1" step="1" inputmode="numeric" placeholder="Ryos" aria-label="Montant">
+          <button class="btn sm" data-act="adj" data-id="${sel.user_id}" data-sign="1">+ Créditer</button>
+          <button class="btn ghost sm" data-act="adj" data-id="${sel.user_id}" data-sign="-1">− Retirer</button></div>
+        <p class="eyebrow" style="margin:0 0 6px">Rôle</p>
+        <div class="row" style="margin-bottom:16px">${me ? '<span class="mut">C\'est ton compte : tu ne peux pas te retirer toi-même de la gérance.</span>' : sel.orga
+          ? `<button class="btn danger sm" data-act="orga" data-id="${sel.user_id}" data-on="0" data-confirm="Confirmer">Retirer de la gérance</button>`
+          : `<button class="btn sm" data-act="orga" data-id="${sel.user_id}" data-on="1">Nommer gérant</button>
+             ${bl ? `<span class="mut">Blacklisté : retire-le de la blacklist pour pouvoir le nommer.</span>` : `<button class="btn danger sm" data-act="bl-acct" data-name="${esc(sel.username)}" data-confirm="Confirmer">Blacklister</button>`}`}</div>
+        <p class="eyebrow" style="margin:0 0 6px">Mot de passe oublié</p>
+        <div class="adj" style="justify-content:flex-start;margin-bottom:16px"><input id="pw-${sel.user_id}" type="text" autocomplete="off" placeholder="Nouveau mot de passe" style="width:200px" aria-label="Nouveau mot de passe">
+          <button class="btn ghost sm" data-act="acct-pw" data-id="${sel.user_id}">Changer le mot de passe</button></div>
+        ${me ? "" : `<p class="eyebrow" style="margin:0 0 6px">Supprimer</p>
+        <div class="row"><button class="btn danger sm" data-act="acct-del" data-id="${sel.user_id}" data-confirm="Confirmer : supprimer définitivement">Supprimer le compte</button>
+          <span class="mut" style="font-size:13px">Ses paris restent dans l'historique, son bilan et ses mouvements sont effacés.</span></div>`}
+      </div></section>`;
+    })();
+
+    return `${panel}
+    <section class="sec"><div class="sec-head"><div><h2>Gérants · ${gerants.length}</h2>
+        <p class="sub">Un gérant a accès à tout l'onglet Gérance, tout de suite. À réserver aux personnes de confiance.</p></div></div>
+      <div class="row" style="margin-bottom:14px">${gerants.map(a => `<button class="btn ghost sm" data-act="acct-sel" data-id="${a.user_id}">${esc(a.username)}${a.user_id === backend.user.id ? " (toi)" : ""}</button>`).join("")}</div>
+      ${candidats.length ? `<form class="form" data-form="gerant" style="max-width:640px">
+        <label class="f"><span class="eyebrow">Nommer un nouveau gérant</span><select id="ger-user">${candidats.map(a => `<option value="${a.user_id}">${esc(a.username)}</option>`).join("")}</select></label>
+        <button class="btn" type="submit">Nommer gérant</button></form>`
+        : `<p class="hint">Pour nommer quelqu'un gérant, il doit d'abord se créer un compte sur le site (onglet Connexion).</p>`}
+    </section>
+    <section class="sec"><div class="sec-head"><div><h2>Tous les comptes · ${accountList.length}</h2>
+        <p class="sub">L'inscription est libre. Bilan négatif : le joueur doit des ryos ; positif : la gérance lui en doit. Clique sur « Gérer » pour un compte.</p></div>
+        <label class="f filter"><span class="eyebrow">Chercher un nom</span><input id="acct-q" type="search" autocomplete="off" placeholder="Ex. Ryuta"></label></div>
+      ${list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Rôle</th><th class="num">Bilan</th><th class="num">Inscrit le</th><th></th></tr></thead><tbody>
+        ${list.map(a => `<tr><td class="who">${esc(a.username)}${a.user_id === backend.user.id ? ' <span class="mut">(toi)</span>' : ""}</td><td>${role(a)}</td>
+          <td class="num"><b class="${balCls(a.balance)}">${fmtSigned(a.balance)}</b> 両</td><td class="num mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
+          <td class="num"><button class="btn ${a.user_id === selAcct ? "" : "ghost "}sm" data-act="acct-sel" data-id="${a.user_id}">Gérer</button></td></tr>`).join("")}
+      </tbody></table></div>` : emptyBox("契", acctQ ? "Aucun compte ne correspond." : "Aucun compte pour l'instant.")}
     </section>`;
+  })();
 
   const blacklist = `<section class="sec"><div class="sec-head"><div><h2><span class="k">禁</span>Blacklist du tournoi · ${S.blacklist.length}</h2>
       <p class="sub">Une personne blacklistée ne peut plus parier, ni créer de compte, ni être inscrite dans une équipe. Les majuscules et accents ne comptent pas (« Ryūta » = « ryuta »). Ses paris déjà placés restent : annule-les dans l'onglet Paris si besoin.</p></div></div>
@@ -1100,8 +1145,8 @@ function vOrga(){
 
 /* Sous-onglets de la gérance : tout ce qui est réservé se trouve ici, nulle part ailleurs */
 let gTab = "apercu";
-const GTABS = [["apercu", "Aperçu"], ["combats", "Combats"], ["equipes", "Équipes"], ["paris", "Paris"],
-  ["historique", "Historique"], ["comptes", "Comptes et ryos"], ["blacklist", "Blacklist"]];
+const GTABS = [["apercu", "Aperçu"], ["comptes", "Comptes et gérants"], ["combats", "Combats"], ["equipes", "Équipes"],
+  ["paris", "Paris"], ["historique", "Historique"], ["blacklist", "Blacklist"]];
 
 function mrow(m){
   const both = m.team_a && m.team_b;
@@ -1218,6 +1263,9 @@ const ACTIONS = {
   "auth-mode": b => { authMode = b.dataset.mode; render(true); },
   "gtab": b => { gTab = b.dataset.g; if (tab !== "orga") go("orga"); else { render(true); window.scrollTo({top:0}); } },
   "load-accounts": () => run(async () => { accountList = await backend.accounts(); }),
+  "acct-sel": b => { selAcct = b.dataset.id; if (tab !== "orga" || gTab !== "comptes"){ gTab = "comptes"; go("orga"); } else { render(true); window.scrollTo({top:0}); } },
+  "acct-pw": b => run(async () => { await backend.setPassword(b.dataset.id, ($("pw-" + b.dataset.id) || {}).value); }, "Mot de passe changé. Donne-le au joueur.", true),
+  "acct-del": b => run(async () => { await backend.deleteUser(b.dataset.id); selAcct = ""; await reload(); }, "Compte supprimé."),
   "orga": b => run(async () => { await backend.setOrga(b.dataset.id, b.dataset.on === "1"); accountList = await backend.accounts(); },
     b.dataset.on === "1" ? "Nommé gérant." : "Retiré de la gérance."),
   "bl-acct": b => run(() => addBlacklist(b.dataset.name, ""), "Ajouté à la blacklist."),
@@ -1245,6 +1293,7 @@ document.addEventListener("submit", e => {
   const k = f.dataset.form;
   if (k === "team") run(() => addTeam({name:$("tf-name").value, p1:$("tf-p1").value, p2:$("tf-p2").value}), "Équipe inscrite.", true);
   if (k === "bet") run(() => addBet({bettor:($("bf-who") || {}).value, userId:($("bf-user") || {}).value, matchId:$("bet-match").value, teamId:$("bet-team").value, amount:$("bf-amount").value}), "Pari enregistré.", true);
+  if (k === "gerant") run(async () => { await backend.setOrga($("ger-user").value, true); await reload(); }, "Nommé gérant.", true);
   if (k === "blacklist") run(() => addBlacklist($("bl-name").value, $("bl-reason").value), "Ajouté à la blacklist.", true);
   if (k === "login") run(async () => { await backend.login($("lg-user").value, $("lg-pw").value); await reload(); }, "Connecté.", true);
   if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value); authMode = "login"; await reload(); }, "Compte créé. Bienvenue !", true);
@@ -1254,6 +1303,7 @@ document.addEventListener("change", e => { if (e.target.id === "bet-match") sync
 document.addEventListener("input", e => {
   if (e.target.id === "bf-amount") updateGain();
   if (e.target.id === "hist-q"){ histQ = e.target.value; render(false); }
+  if (e.target.id === "acct-q"){ acctQ = e.target.value; render(false); }
 });
 window.addEventListener("hashchange", () => { const t = location.hash.slice(1); if (VIEWS[t] && t !== tab) go(t); });
 
