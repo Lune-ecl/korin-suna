@@ -43,6 +43,40 @@ create table if not exists public.bets (
   created_at  timestamptz not null default now()
 );
 
+-- =============================================================
+--  Éditions du Korin : un Korin est programmé avec une date
+--  d'ouverture, puis clôturé et gardé dans l'historique.
+--  Une seule édition à la fois sans date de clôture (l'édition en cours).
+-- =============================================================
+create table if not exists public.editions (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  starts_at   timestamptz not null,           -- ouverture au public (tableau, équipes, paris)
+  ended_at    timestamptz,                    -- null = édition en cours
+  created_at  timestamptz not null default now()
+);
+create unique index if not exists editions_une_seule_en_cours on public.editions ((true)) where ended_at is null;
+
+alter table public.teams   add column if not exists edition_id uuid references public.editions(id) on delete cascade;
+alter table public.matches add column if not exists edition_id uuid references public.editions(id) on delete cascade;
+alter table public.bets    add column if not exists edition_id uuid references public.editions(id) on delete cascade;
+
+-- Les noms d'équipe et les places du tableau sont uniques par édition (plus sur tout le site)
+alter table public.teams   drop constraint if exists teams_name_key;
+alter table public.matches drop constraint if exists matches_round_slot_key;
+create unique index if not exists teams_nom_par_edition   on public.teams (edition_id, name);
+create unique index if not exists matches_place_par_edition on public.matches (edition_id, round, slot);
+
+-- Vrai si l'édition est en cours et sa date d'ouverture est passée
+create or replace function public.edition_open(p_edition uuid)
+returns boolean
+language sql stable security definer
+set search_path = public
+as $$
+  select exists (select 1 from public.editions where id = p_edition and ended_at is null and starts_at <= now());
+$$;
+grant execute on function public.edition_open(uuid) to anon, authenticated;
+
 -- Organisateurs (famille Chiiketsu)
 create table if not exists public.admins (
   user_id uuid primary key references auth.users(id) on delete cascade
@@ -263,6 +297,10 @@ begin
   if not public.is_admin() and (auth.uid() is null or new.user_id is distinct from auth.uid()) then
     raise exception 'Connecte-toi pour parier.';
   end if;
+  if not public.is_admin() and not public.edition_open(m.edition_id) then
+    raise exception 'Le Korin n''est pas encore ouvert.';
+  end if;
+  new.edition_id := m.edition_id;
   new.odds := case when new.team_id = m.team_a then m.odds_a else m.odds_b end;
   new.status := 'en_cours';
   new.payout := 0;
@@ -338,16 +376,28 @@ alter table public.matches enable row level security;
 alter table public.bets    enable row level security;
 alter table public.admins   enable row level security;
 alter table public.profiles enable row level security;
+alter table public.editions enable row level security;
 
+-- Éditions : la date du prochain Korin est publique, seule la gérance les gère
+drop policy if exists "lecture publique" on public.editions;
+drop policy if exists "gerance gere les editions" on public.editions;
+create policy "lecture publique" on public.editions for select using (true);
+create policy "gerance gere les editions" on public.editions for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- Équipes et combats : visibles du public seulement quand le Korin est ouvert
+-- (avant la date d'ouverture et après la clôture, seule la gérance les voit)
 drop policy if exists "lecture publique" on public.teams;
 drop policy if exists "orgas ecrivent"   on public.teams;
-create policy "lecture publique" on public.teams for select using (true);
+create policy "lecture publique" on public.teams for select
+  using (public.is_admin() or public.edition_open(edition_id));
 create policy "orgas ecrivent"   on public.teams for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
 drop policy if exists "lecture publique" on public.matches;
 drop policy if exists "orgas ecrivent"   on public.matches;
-create policy "lecture publique" on public.matches for select using (true);
+create policy "lecture publique" on public.matches for select
+  using (public.is_admin() or public.edition_open(edition_id));
 create policy "orgas ecrivent"   on public.matches for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
@@ -429,6 +479,7 @@ begin
   begin alter publication supabase_realtime add table public.profiles; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.ledger;   exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.blacklist; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.editions;  exception when duplicate_object then null; end;
 end $$;
 
 -- =============================================================
