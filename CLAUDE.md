@@ -6,6 +6,7 @@ Site du **Korin de Suna**, tournoi de 2 contre 2 avec paris en ryos, pour une co
 - Base de données : Supabase, projet `korin-suna`, URL `https://jidpdwngoazxcdgpmwyc.supabase.co`
 
 ## Fichiers
+- **À chaque mise en ligne de `index.html`, changer `APP_VERSION`** (en bas du script) : les navigateurs ouverts comparent cette valeur avec la version en ligne et se rechargent tout seuls (GitHub Pages garde la page 10 min en cache).
 - `index.html` : tout le site (HTML, CSS et JS dans un seul fichier, aucune étape de build). La librairie `@supabase/supabase-js` est chargée depuis jsDelivr.
 - `schema.sql` : tables, sécurité (RLS) et temps réel. À coller dans Supabase → SQL Editor → Run. Le script peut être relancé sans risque.
 

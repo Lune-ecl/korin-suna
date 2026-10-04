@@ -1589,6 +1589,33 @@ async function init(){
 }
 init();
 
+/* ---------- Mise à jour automatique ----------
+   GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
+   avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
+const APP_VERSION = "2026-10-04.2";
+let updateShown = false;
+async function checkUpdate(){
+  if (updateShown) return;
+  try {
+    const r = await fetch(location.pathname + "?v=" + Date.now(), {cache:"no-store"});
+    const m = (await r.text()).match(/const APP_VERSION = "([^"]+)"/);
+    if (!m || m[1] === APP_VERSION) return;
+    const a = document.activeElement, typing = a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && a.value;
+    let tried = null; try { tried = sessionStorage.getItem("korin-maj"); } catch(e){}
+    if (!typing && tried !== m[1]){   // une seule tentative par version, pour ne jamais boucler
+      try { sessionStorage.setItem("korin-maj", m[1]); } catch(e){}
+      ACTIONS.reload(); return;
+    }
+    updateShown = true;   // quelqu'un écrit, ou le rechargement n'a pas suffi : on propose un bouton
+    $("notice-text").innerHTML = '<b>Nouvelle version du site.</b> <button class="btn sm" data-act="reload">Recharger</button>';
+    $("notice").hidden = false;
+  } catch(e){}
+}
+ACTIONS.reload = () => { location.href = location.pathname + "?v=" + Date.now() + location.hash; };
+checkUpdate();
+setInterval(checkUpdate, 120000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkUpdate(); });
+
 /* Exposé pour les tests uniquement */
 window.__korin = {buildBracket};
 })();
