@@ -154,6 +154,17 @@ drop trigger if exists teams_check_blacklist on public.teams;
 create trigger teams_check_blacklist before insert or update on public.teams
   for each row execute function public.teams_check_blacklist();
 
+-- Grades RP (dans l'ordre). Le joueur choisit le sien à l'inscription et peut le changer ensuite.
+create or replace function public.grade_list()
+returns text[]
+language sql immutable
+as $$
+  select array['Apprenti Genin', 'Genin', 'Genin confirmé', 'Chunin', 'Konin', 'Tokubetsu Jonin', 'Jonin', 'Commandant Jonin', 'Kazekage'];
+$$;
+alter table public.profiles add column if not exists grade text;
+alter table public.profiles drop constraint if exists profiles_grade_check;
+alter table public.profiles add constraint profiles_grade_check check (grade is null or grade = any (public.grade_list()));
+
 -- Crée automatiquement le profil quand quelqu'un s'inscrit sur le site (inscription libre, sauf blacklist)
 create or replace function public.handle_new_user()
 returns trigger
@@ -164,8 +175,9 @@ begin
   if public.is_blacklisted(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))) then
     raise exception 'Ce nom est sur la blacklist du Korin.';
   end if;
-  insert into public.profiles (user_id, username)
-  values (new.id, btrim(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))));
+  insert into public.profiles (user_id, username, grade)
+  values (new.id, btrim(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))),
+          case when new.raw_user_meta_data->>'grade' = any (public.grade_list()) then new.raw_user_meta_data->>'grade' end);
   return new;
 end;
 $$;
@@ -279,6 +291,23 @@ end;
 $$;
 revoke execute on function public.admin_delete_user(uuid) from public, anon;
 grant  execute on function public.admin_delete_user(uuid) to authenticated;
+
+-- Changer de grade : chacun le sien, la gérance celui de tout le monde
+create or replace function public.set_grade(p_user uuid, p_grade text)
+returns void
+language plpgsql security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then raise exception 'Connecte-toi.'; end if;
+  if p_user <> auth.uid() and not public.is_admin() then raise exception 'Tu ne peux changer que ton propre grade.'; end if;
+  if not (p_grade = any (public.grade_list())) then raise exception 'Grade inconnu.'; end if;
+  update public.profiles set grade = p_grade where user_id = p_user;
+  if not found then raise exception 'Compte introuvable.'; end if;
+end;
+$$;
+revoke execute on function public.set_grade(uuid, text) from public, anon;
+grant  execute on function public.set_grade(uuid, text) to authenticated;
 
 -- Nouveau pari : vérifie le combat, gèle la cote, prélève la mise
 create or replace function public.bets_before_insert()

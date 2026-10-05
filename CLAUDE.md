@@ -24,6 +24,7 @@ Site du **Korin de Suna**, tournoi de 2 contre 2 avec paris en ryos, pour une co
 - « Orga » s'appelle **Gérance** dans l'interface (onglet, rôle « Gérant », bouton « Nommer gérant », sans confirmation). L'inscription des comptes est libre et immédiate.
 - Les joueurs connectés parient eux-mêmes (un seul camp par combat) ; **un pari placé est définitif** (pas de retrait par le joueur, seule la gérance peut annuler, mise rendue). Les orgas gèrent équipes, cotes, résultats, et peuvent parier pour le compte d'un joueur. Le public lit tout sans compte.
 - Connexion par **nom RP (prénom + nom, ex. « Ryuta Chiiketsu ») + mot de passe**, sans e-mail : le site fabrique un e-mail invisible à partir du nom sans accents ni majuscules (`ryuta.chiiketsu@korin-suna.app`), donc « Ryūta chiiketsu » ouvre le même compte. Le nom tel qu'écrit à l'inscription est affiché (`profiles.username`). Un trigger crée la ligne `profiles`. Les droits d'orga se donnent dans la table `admins` (section « Comptes et ryos » de l'onglet Orga).
+- **Grades RP** (`profiles.grade`, liste `GRADES` en JS = `public.grade_list()` en SQL, dans l'ordre : Apprenti Genin → Kazekage) : obligatoire à l'inscription, modifiable par le joueur (page Compte) et par la gérance (panneau Gérer), via `set_grade()`.
 - En mode démo, pas de comptes : l'orga saisit le nom du parieur à la main, sans solde.
 - Thème : sombre noir et bordeaux, doré, kanjis rouges. La propriétaire a demandé de **ne pas** remettre l'affiche du Korin sur le site.
 

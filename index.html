@@ -57,6 +57,7 @@ button,input,select{font:inherit;color:inherit}
 .wallet .v small{font:500 18px var(--f-kanji);color:var(--blood);margin-left:6px}
 .adj{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
 .adj input{width:96px;padding:7px 8px}
+.adj select{width:auto;min-width:180px;padding:7px 8px}
 .notice{border-bottom:1px solid var(--line-soft);background:rgba(110,20,24,.28);color:var(--sand);font-size:13.5px}
 .notice .wrap{padding-block:8px}
 .notice b{color:var(--gold);font-weight:600}
@@ -287,6 +288,9 @@ const plural = (n, s, p) => n + " " + (n > 1 ? (p || s + "s") : s);
 
 /* Connexion par nom RP (ex. « Ryuta Chiiketsu ») : Supabase exige un e-mail, on en fabrique un invisible
    à partir du nom sans accents ni majuscules (ryuta.chiiketsu@korin-suna.app). « Ryūta chiiketsu » ouvre donc le même compte. */
+/* Grades RP, dans l'ordre (même liste que public.grade_list() dans schema.sql) */
+const GRADES = ["Apprenti Genin", "Genin", "Genin confirmé", "Chunin", "Konin", "Tokubetsu Jonin", "Jonin", "Commandant Jonin", "Kazekage"];
+const gradeSelect = (id, cur) => `<select id="${id}"><option value="">— Choisis un grade —</option>${GRADES.map(g => `<option${g === cur ? " selected" : ""}>${esc(g)}</option>`).join("")}</select>`;
 const LOGIN_DOMAIN = "korin-suna.app";
 /* Même règle que public.name_key() dans schema.sql (sert aussi pour la blacklist) */
 const nameKey = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
@@ -367,11 +371,11 @@ function supaBackend(){
       let me = null, ledger = [], blacklist = [];
       if (this.user){
         const [p, l] = await Promise.all([
-          sb.from("profiles").select("username, balance").eq("user_id", this.user.id).maybeSingle(),
+          sb.from("profiles").select("username, balance, grade").eq("user_id", this.user.id).maybeSingle(),
           sb.from("ledger").select("*").eq("user_id", this.user.id).order("created_at", {ascending:false}).limit(100)
         ]);
         [p, l].forEach(chk);
-        me = p.data ? {username:p.data.username, balance:Number(p.data.balance), banned:false} : null;
+        me = p.data ? {username:p.data.username, balance:Number(p.data.balance), grade:p.data.grade || "", banned:false} : null;
         if (me) me.banned = !!soft(await sb.rpc("is_blacklisted", {p_name:me.username}));
         ledger = l.data;
         if (this.isAdmin) blacklist = soft(await sb.from("blacklist").select("*").order("name")) || [];
@@ -400,12 +404,13 @@ function supaBackend(){
       if (error) fail("Connexion refusée : nom ou mot de passe incorrect.");
       await this.checkAdmin();
     },
-    async signup(username, password, password2){
+    async signup(username, password, password2, grade){
       const u = cleanUsername(username);
+      if (!GRADES.includes(grade)) fail("Choisis ton grade.");
       if ((password || "").length < 6) fail("Le mot de passe doit faire au moins 6 caractères.");
       if (password !== password2) fail("Les deux mots de passe ne sont pas identiques.");
       if (await this.nameBlacklisted(u.name)) fail("Inscription impossible : ce nom est sur la blacklist du Korin.");
-      const {data, error} = await sb.auth.signUp({email:toEmail(u), password, options:{data:{username:u.name}}});
+      const {data, error} = await sb.auth.signUp({email:toEmail(u), password, options:{data:{username:u.name, grade}}});
       if (error){
         if (/already|registered|exists/i.test(error.message)) fail("Ce nom est déjà pris.");
         if (/database error/i.test(error.message)) fail("Inscription refusée : ce nom est sur la blacklist du Korin, ou il est invalide.");
@@ -416,7 +421,7 @@ function supaBackend(){
     },
     async accounts(){
       const [p, a] = await Promise.all([
-        sb.from("profiles").select("user_id, username, created_at, balance").order("username"),
+        sb.from("profiles").select("user_id, username, created_at, balance, grade").order("username"),
         sb.from("admins").select("user_id")
       ]);
       [p, a].forEach(chk);
@@ -427,6 +432,10 @@ function supaBackend(){
       if (userId === this.user.id && !on) fail("Tu ne peux pas te retirer toi-même de la gérance.");
       if (on) chk(await sb.from("admins").insert([{user_id:userId}]));
       else chk(await sb.from("admins").delete().eq("user_id", userId));
+    },
+    async setGrade(userId, grade){
+      if (!GRADES.includes(grade)) fail("Choisis un grade.");
+      chk(await sb.rpc("set_grade", {p_user:userId, p_grade:grade}));
     },
     async setPassword(userId, pw){
       if (String(pw || "").length < 6) fail("Le mot de passe doit faire au moins 6 caractères.");
@@ -1300,6 +1309,7 @@ function authForm(){
       <button class="btn ${su ? "" : "ghost"} sm" data-act="auth-mode" data-mode="signup" aria-pressed="${su}">Créer un compte</button></div>
     <form class="form" id="auth-form" data-form="${su ? "signup" : "login"}" style="max-width:${su ? 860 : 640}px">
     <label class="f"><span class="eyebrow">Prénom et nom RP</span><input id="lg-user" autocomplete="username" autocapitalize="words" spellcheck="false" maxlength="40" placeholder="Ex. Ryuta Chiiketsu" required></label>
+    ${su ? `<label class="f"><span class="eyebrow">Grade</span>${gradeSelect("lg-grade", "")}</label>` : ""}
     <label class="f"><span class="eyebrow">Mot de passe</span><input id="lg-pw" type="password" autocomplete="${su ? "new-password" : "current-password"}" required></label>
     ${su ? `<label class="f"><span class="eyebrow">Confirmer le mot de passe</span><input id="lg-pw2" type="password" autocomplete="new-password" required></label>` : ""}
     <button class="btn" type="submit">${su ? "Créer le compte" : "Se connecter"}</button></form>
@@ -1321,6 +1331,10 @@ function vCompte(){
       <div class="row"><button class="btn" data-tab="paris">Parier</button><button class="btn ghost" data-act="logout">Se déconnecter</button></div>
     </div>
     ${me.banned ? `<div class="panel danger-zone" style="margin-top:12px"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div>` : ""}
+    <div class="panel wallet" style="margin-top:12px${me.grade ? "" : ";border-color:var(--gold)"}">
+      <div><div class="eyebrow">Grade</div><div class="v" style="font-size:1.6rem">${me.grade ? esc(me.grade) : '<span class="mut">Pas encore choisi</span>'}</div></div>
+      <div class="adj">${gradeSelect("grade-me", me.grade)}<button class="btn ${me.grade ? "ghost " : ""}sm" data-act="grade-me">${me.grade ? "Changer de grade" : "Enregistrer mon grade"}</button></div>
+    </div>
     ${(() => { const f = myFighter(); return `<div class="panel wallet" style="margin-top:12px">
       <div><div class="eyebrow">Classement des combattants</div><div class="v ${f && f.points ? "pos" : "mut"}">${plural(f ? f.points : 0, "point")}</div></div>
       <div>${f ? `<span class="eyebrow">Rang ${f.rank}</span>` : `<span class="mut" style="font-size:13px">Tu n'as encore combattu dans aucun Korin.</span>`}
@@ -1380,6 +1394,9 @@ function vOrga(){
           ? `<button class="btn danger sm" data-act="orga" data-id="${sel.user_id}" data-on="0" data-confirm="Confirmer">Retirer de la gérance</button>`
           : `<button class="btn sm" data-act="orga" data-id="${sel.user_id}" data-on="1">Nommer gérant</button>
              ${bl ? `<span class="mut">Blacklisté : retire-le de la blacklist pour pouvoir le nommer.</span>` : `<button class="btn danger sm" data-act="bl-acct" data-name="${esc(sel.username)}" data-confirm="Confirmer">Blacklister</button>`}`}</div>
+        <p class="eyebrow" style="margin:0 0 6px">Grade</p>
+        <div class="adj" style="justify-content:flex-start;margin-bottom:16px">${gradeSelect("gr-" + sel.user_id, sel.grade)}
+          <button class="btn ghost sm" data-act="grade-set" data-id="${sel.user_id}">Changer le grade</button></div>
         <p class="eyebrow" style="margin:0 0 6px">Mot de passe oublié</p>
         <div class="adj" style="justify-content:flex-start;margin-bottom:16px"><input id="pw-${sel.user_id}" type="text" autocomplete="off" placeholder="Nouveau mot de passe" style="width:200px" aria-label="Nouveau mot de passe">
           <button class="btn ghost sm" data-act="acct-pw" data-id="${sel.user_id}">Changer le mot de passe</button></div>
@@ -1401,8 +1418,8 @@ function vOrga(){
     <section class="sec"><div class="sec-head"><div><h2>Tous les comptes · ${accountList.length}</h2>
         <p class="sub">L'inscription est libre. Bilan négatif : le joueur doit des ryos ; positif : la gérance lui en doit. Clique sur « Gérer » pour un compte.</p></div>
         <label class="f filter"><span class="eyebrow">Chercher un nom</span><input id="acct-q" type="search" autocomplete="off" placeholder="Ex. Ryuta"></label></div>
-      ${list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Rôle</th><th class="num">Bilan</th><th class="num">Inscrit le</th><th></th></tr></thead><tbody>
-        ${list.map(a => `<tr><td class="who">${esc(a.username)}${a.user_id === backend.user.id ? ' <span class="mut">(toi)</span>' : ""}</td><td>${role(a)}</td>
+      ${list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Grade</th><th>Rôle</th><th class="num">Bilan</th><th class="num">Inscrit le</th><th></th></tr></thead><tbody>
+        ${list.map(a => `<tr><td class="who">${esc(a.username)}${a.user_id === backend.user.id ? ' <span class="mut">(toi)</span>' : ""}</td><td>${a.grade ? esc(a.grade) : '<span class="mut">—</span>'}</td><td>${role(a)}</td>
           <td class="num"><b class="${balCls(a.balance)}">${fmtSigned(a.balance)}</b> 両</td><td class="num mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
           <td class="num"><button class="btn ${a.user_id === selAcct ? "" : "ghost "}sm" data-act="acct-sel" data-id="${a.user_id}">Gérer</button></td></tr>`).join("")}
       </tbody></table></div>` : emptyBox("契", acctQ ? "Aucun compte ne correspond." : "Aucun compte pour l'instant.")}
@@ -1585,6 +1602,8 @@ const ACTIONS = {
   "ed-close": () => run(closeEdition, "Korin clôturé et rangé dans l'historique."),
   "ed-del": b => run(() => deleteEdition(b.dataset.id), "Korin supprimé de l'historique."),
   "acct-sel": b => { selAcct = b.dataset.id; if (tab !== "orga" || gTab !== "comptes"){ gTab = "comptes"; go("orga"); } else { render(true); window.scrollTo({top:0}); } },
+  "grade-me": () => run(async () => { await backend.setGrade(backend.user.id, $("grade-me").value); await reload(); }, "Grade enregistré."),
+  "grade-set": b => run(async () => { await backend.setGrade(b.dataset.id, $("gr-" + b.dataset.id).value); await reload(); }, "Grade changé."),
   "acct-pw": b => run(async () => { await backend.setPassword(b.dataset.id, ($("pw-" + b.dataset.id) || {}).value); }, "Mot de passe changé. Donne-le au joueur.", true),
   "acct-del": b => run(async () => { await backend.deleteUser(b.dataset.id); selAcct = ""; await reload(); }, "Compte supprimé."),
   "orga": b => run(async () => { await backend.setOrga(b.dataset.id, b.dataset.on === "1"); accountList = await backend.accounts(); },
@@ -1619,7 +1638,7 @@ document.addEventListener("submit", e => {
   if (k === "gerant") run(async () => { await backend.setOrga($("ger-user").value, true); await reload(); }, "Nommé gérant.", true);
   if (k === "blacklist") run(() => addBlacklist($("bl-name").value, $("bl-reason").value), "Ajouté à la blacklist.", true);
   if (k === "login") run(async () => { await backend.login($("lg-user").value, $("lg-pw").value); await reload(); }, "Connecté.", true);
-  if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value); authMode = "login"; await reload(); }, "Compte créé. Bienvenue !", true);
+  if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value, $("lg-grade").value); authMode = "login"; await reload(); }, "Compte créé. Bienvenue !", true);
 });
 
 document.addEventListener("change", e => { if (e.target.id === "bet-match") syncBetForm(); if (e.target.id === "bet-team") updateGain(); });
@@ -1666,7 +1685,7 @@ init();
 /* ---------- Mise à jour automatique ----------
    GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
    avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
-const APP_VERSION = "2026-10-04.5";
+const APP_VERSION = "2026-10-05.1";
 let updateShown = false;
 async function checkUpdate(){
   if (updateShown) return;
