@@ -332,8 +332,8 @@ const plural = (n, s, p) => n + " " + (n > 1 ? (p || s + "s") : s);
 const GRADES = ["Apprenti Genin", "Genin", "Genin confirmé", "Chunin", "Konin", "Tokubetsu Jonin", "Jonin", "Commandant Jonin", "Kazekage"];
 /* Au-dessus de Tokubetsu Jonin, le grade doit être validé par la gérance (anti-trolls) */
 const needsApproval = g => GRADES.indexOf(g) > GRADES.indexOf("Tokubetsu Jonin");
-const gradeSelect = (id, cur) => `<select id="${id}"><option value="">— Choisis un grade —</option>${GRADES.map(g =>
-  `<option value="${esc(g)}"${g === cur ? " selected" : ""}>${esc(g)}${needsApproval(g) ? " · validation de la gérance" : ""}</option>`).join("")}</select>`;
+const gradeSelect = (id, cur, plain) => `<select id="${id}"><option value="">— Choisis un grade —</option>${GRADES.map(g =>
+  `<option value="${esc(g)}"${g === cur ? " selected" : ""}>${esc(g)}${needsApproval(g) && !plain ? " · validation de la gérance" : ""}</option>`).join("")}</select>`;
 const LOGIN_DOMAIN = "korin-suna.app";
 /* Même règle que public.name_key() dans schema.sql (sert aussi pour la blacklist) */
 const nameKey = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
@@ -349,24 +349,27 @@ const toEmail = u => u.slug + "@" + LOGIN_DOMAIN;
 let authMode = "login";
 let accountList = null;
 
-let S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[], editions:[], cur:null, allTeams:[], allMatches:[], allBets:[]};
+let S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[], editions:[], cur:null, allTeams:[], allMatches:[], allBets:[], tours:[], allTours:[]};
 let backend = null;
 let histQ = "";
 let acctQ = "", selAcct = "";   // Gérance → Comptes : recherche et compte ouvert dans le panneau « Gérer »
 let histEd = "";                 // Gérance → Historique : édition affichée en détail ("" = liste de tous les Korin)
+let selTour = "";                // Onglet Tableau : tournoi affiché ("" = le premier)
+let lastTour = "";               // Gérance → Équipes : dernier tournoi choisi (gardé d'une inscription à l'autre)
 
 /* ---------- Stockage : mode démo (ce navigateur) ---------- */
 function demoBackend(){
-  const KEY = "korin-demo-v2";
+  const KEY = "korin-demo-v3";
   let data = null;
   try { data = JSON.parse(localStorage.getItem(KEY)); } catch(e){ data = null; }
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch(e){} };
   return {
     mode:"demo", isAdmin:true, user:null,
     async load(){
-      if (!data){ data = {teams:[], matches:[], bets:[], editions:[], blacklist:[]}; await seedDemo(); save(); }
+      if (!data){ data = {teams:[], matches:[], bets:[], editions:[], tournaments:[], blacklist:[]}; await seedDemo(); save(); }
       data.blacklist = data.blacklist || [];
       data.editions = data.editions || [];
+      data.tournaments = data.tournaments || [];
       return clone(data);
     },
     async insert(table, rows){ data[table].push(...clone(rows)); save(); },
@@ -375,6 +378,12 @@ function demoBackend(){
       data[table] = data[table].filter(x => x.id !== id);
       if (table === "matches") data.bets = data.bets.filter(b => b.match_id !== id);
       if (table === "teams") data.bets = data.bets.filter(b => b.team_id !== id);
+      if (table === "tournaments"){
+        const ms = new Set(data.matches.filter(m => m.tournament_id === id).map(m => m.id));
+        data.bets = data.bets.filter(b => !ms.has(b.match_id));
+        data.matches = data.matches.filter(m => m.tournament_id !== id);
+        data.teams = data.teams.filter(t => t.tournament_id !== id);
+      }
       save();
     },
     async clear(table, ed){
@@ -382,8 +391,14 @@ function demoBackend(){
       if (table === "matches") data.bets = data.bets.filter(x => x.edition_id !== ed);
       save();
     },
+    async clearTour(table, tour){
+      const gone = new Set(data[table].filter(x => x.tournament_id === tour).map(x => x.id));
+      data[table] = data[table].filter(x => !gone.has(x.id));
+      if (table === "matches") data.bets = data.bets.filter(b => !gone.has(b.match_id));
+      save();
+    },
     async removeEdition(ed){
-      for (const t of ["bets", "matches", "teams"]) data[t] = data[t].filter(x => x.edition_id !== ed);
+      for (const t of ["bets", "matches", "teams", "tournaments"]) data[t] = data[t].filter(x => x.edition_id !== ed);
       data.editions = data.editions.filter(x => x.id !== ed); save();
     },
     async wipe(){ data = null; try { localStorage.removeItem(KEY); } catch(e){} }
@@ -399,14 +414,15 @@ function supaBackend(){
     /* Les paris détaillés ne reviennent que pour soi (ou tous pour la gérance) ;
        les totaux et le classement passent par des fonctions qui ne donnent que des sommes. */
     async load(){
-      const [t, m, b, tot, lb, ed, res] = await Promise.all([
+      const [t, m, b, tot, lb, ed, res, tr] = await Promise.all([
         sb.from("teams").select("*").order("created_at"),
         sb.from("matches").select("*").order("round").order("slot"),
         sb.from("bets").select("*").order("created_at", {ascending:false}),
         sb.rpc("bet_totals"),
         sb.rpc("leaderboard"),
         sb.from("editions").select("*").order("starts_at"),
-        sb.rpc("korin_results")
+        sb.rpc("korin_results"),
+        sb.from("tournaments").select("*").order("position").order("created_at")
       ]);
       [t, m, b].forEach(chk);
       const soft = r => r.error ? null : r.data;   // fonctions absentes si schema.sql n'est pas à jour : on retombe sur un calcul local
@@ -424,7 +440,7 @@ function supaBackend(){
         if (this.isAdmin) blacklist = soft(await sb.from("blacklist").select("*").order("name")) || [];
       }
       const board = soft(lb) && lb.data.map(o => ({name:o.bettor, n:o.n, won:o.won, lost:o.lost, staked:o.staked, returned:o.returned, pending:o.pending}));
-      return {teams:t.data, matches:m.data, bets:b.data, totals:soft(tot), board, me, ledger, blacklist, editions, results:soft(res)};
+      return {teams:t.data, matches:m.data, bets:b.data, totals:soft(tot), board, me, ledger, blacklist, editions, results:soft(res), tournaments:soft(tr) || []};
     },
     async nameBlacklisted(name){ const r = await sb.rpc("is_blacklisted", {p_name:name}); return !r.error && !!r.data; },
     async adjust(userId, delta){ chk(await sb.rpc("adjust_ryos", {p_user:userId, p_delta:delta, p_reason:null})); },
@@ -433,6 +449,7 @@ function supaBackend(){
     async remove(table, id){ chk(await sb.from(table).delete().eq("id", id)); },
     async clear(table, ed){ chk(await sb.from(table).delete().eq("edition_id", ed)); },
     async removeEdition(ed){ chk(await sb.from("editions").delete().eq("id", ed)); },
+    async clearTour(table, tour){ chk(await sb.from(table).delete().eq("tournament_id", tour)); },
     async checkAdmin(){
       const {data} = await sb.auth.getUser();
       this.user = data && data.user ? data.user : null;
@@ -515,6 +532,8 @@ async function reload(){
   S.teams = S.allTeams.filter(x => x.edition_id === cid);
   S.matches = S.allMatches.filter(x => x.edition_id === cid);
   S.bets = S.allBets.filter(x => x.edition_id === cid);
+  S.allTours = (S.tournaments || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0) || String(a.created_at).localeCompare(String(b.created_at)));
+  S.tours = S.allTours.filter(x => x.edition_id === cid);
   if (!S.results) S.results = computeResults();
   S.totals.forEach(x => { x.n = Number(x.n); x.total = Number(x.total); });
   S.board = S.board.map(o => ({...o, net:Number(o.returned) - Number(o.staked)}))
@@ -535,12 +554,14 @@ function computeTotals(bets){
 function computeResults(){
   const out = [];
   for (const e of S.editions.filter(e => e.ended_at || Date.parse(e.starts_at) <= Date.now())){
-    const ms = S.allMatches.filter(m => m.edition_id === e.id);
-    const R = ms.reduce((a, m) => Math.max(a, m.round), 0);
-    const fin = ms.find(m => m.round === R && m.slot === 0);
     for (const t of S.allTeams.filter(x => x.edition_id === e.id)){
+      /* la finale et les champions se calculent dans le tournoi de l'équipe */
+      const ms = S.allMatches.filter(m => m.edition_id === e.id && tid(m) === tid(t));
+      const R = ms.reduce((a, m) => Math.max(a, m.round), 0);
+      const fin = ms.find(m => m.round === R && m.slot === 0);
+      const tr = S.allTours.find(x => x.id === tid(t));
       const mine = ms.filter(m => m.team_a === t.id || m.team_b === t.id);
-      out.push({edition_id:e.id, edition_name:e.name, starts_at:e.starts_at, ended_at:e.ended_at, team:t.name, player1:t.player1, player2:t.player2,
+      out.push({edition_id:e.id, edition_name:e.name, starts_at:e.starts_at, ended_at:e.ended_at, tournament:tr ? tr.name : null, team:t.name, player1:t.player1, player2:t.player2,
         wins:ms.filter(m => m.winner === t.id && !m.bye).length,
         losses:mine.filter(m => m.status === "termine" && m.winner && m.winner !== t.id).length,
         reached:mine.reduce((a, m) => Math.max(a, m.round), 0), rounds:R,
@@ -601,7 +622,8 @@ function untilText(s){
 }
 /* Exécute fn comme si l'édition ed était l'édition en cours (pour réutiliser les vues dans l'historique) */
 function withEdition(ed, fn){
-  const keep = {teams:S.teams, matches:S.matches, bets:S.bets};
+  const keep = {teams:S.teams, matches:S.matches, bets:S.bets, tours:S.tours};
+  S.tours = S.allTours.filter(x => x.edition_id === ed);
   S.teams = S.allTeams.filter(x => x.edition_id === ed);
   S.matches = S.allMatches.filter(x => x.edition_id === ed);
   S.bets = S.allBets.filter(x => x.edition_id === ed);
@@ -613,44 +635,106 @@ function needKorin(){ if (!S.cur) fail("Aucun Korin en cours : lance-en un dans 
 const teamById = id => S.teams.find(t => t.id === id);
 const tName = id => { const t = teamById(id); return t ? t.name : "À déterminer"; };
 const matchById = id => S.matches.find(m => m.id === id);
-const totalRounds = () => S.matches.reduce((a, m) => Math.max(a, m.round), 0);
-function roundName(r){
-  const d = totalRounds() - r;
+
+/* Tournois : un Korin en a un par grade (Genin contre Genin, Chunin contre Chunin…).
+   Chaque tournoi a ses équipes, son tableau et ses champions ; tout le calcul du tableau se fait tournoi par tournoi. */
+const tid = x => (x && x.tournament_id) || null;
+const tourById = id => S.tours.find(t => t.id === id) || null;
+const tourMatches = t => S.matches.filter(m => tid(m) === (t || null));
+const tourTeams = t => S.teams.filter(x => tid(x) === (t || null));
+/* Les tournois à afficher (plus un groupe « Sans tournoi » si des équipes n'en ont pas) */
+function tourList(){
+  const l = S.tours.slice();
+  if (S.teams.some(x => !tid(x)) || S.matches.some(x => !tid(x))) l.push({id:null, name:"Sans tournoi", grade_min:null, grade_max:null});
+  return l;
+}
+const gradeIdx = g => GRADES.indexOf(g);
+const gradeIn = (g, t) => gradeIdx(g) >= (t.grade_min ? gradeIdx(t.grade_min) : 0) && gradeIdx(g) <= (t.grade_max ? gradeIdx(t.grade_max) : GRADES.length - 1);
+function gradeRange(t){
+  if (!t.grade_min && !t.grade_max) return "Tous les grades";
+  if (t.grade_min === t.grade_max) return "Grade " + t.grade_min;
+  return `${t.grade_min || GRADES[0]} à ${t.grade_max || GRADES[GRADES.length - 1]}`;
+}
+
+const totalRounds = t => tourMatches(t).reduce((a, m) => Math.max(a, m.round), 0);
+function roundName(r, t){
+  const d = totalRounds(t) - r;
   return ["Finale", "Demi-finales", "Quarts de finale", "Huitièmes de finale", "Seizièmes de finale"][d] || ("Tour " + r);
 }
+/* « Tournoi Genin · Quarts de finale » (le nom du tournoi seulement s'il y en a plusieurs) */
+function matchLabel(m){
+  const r = roundName(m.round, tid(m)), t = tourById(tid(m));
+  return S.tours.length > 1 && t ? t.name + " · " + r : r;
+}
 const vsLabel = m => tName(m.team_a) + " vs " + tName(m.team_b);
-const finalMatch = () => S.matches.find(m => m.round === totalRounds() && m.slot === 0);
-function champion(){ const f = finalMatch(); return f && f.winner ? teamById(f.winner) : null; }
+const finalMatch = t => tourMatches(t).find(m => m.round === totalRounds(t) && m.slot === 0);
+function champion(t){ const f = finalMatch(t); return f && f.winner ? teamById(f.winner) : null; }
 
 function teamStatus(id){
-  if (!S.matches.length) return {key:"inscrite", label:"Inscrite", rank:0};
-  const lost = S.matches.find(m => m.status === "termine" && m.winner && m.winner !== id && (m.team_a === id || m.team_b === id));
-  if (lost) return {key:"out", label:"Éliminée · " + roundName(lost.round), rank:lost.round};
-  const c = champion();
-  if (c && c.id === id) return {key:"champ", label:"Championne", rank:totalRounds() + 2};
-  const reached = Math.max(0, ...S.matches.filter(m => m.team_a === id || m.team_b === id).map(m => m.round));
+  const t = tid(teamById(id)), ms = tourMatches(t);
+  if (!ms.length) return {key:"inscrite", label:"Inscrite", rank:0};
+  const lost = ms.find(m => m.status === "termine" && m.winner && m.winner !== id && (m.team_a === id || m.team_b === id));
+  if (lost) return {key:"out", label:"Éliminée · " + roundName(lost.round, t), rank:lost.round};
+  const c = champion(t);
+  if (c && c.id === id) return {key:"champ", label:"Championne", rank:totalRounds(t) + 2};
+  const reached = Math.max(0, ...ms.filter(m => m.team_a === id || m.team_b === id).map(m => m.round));
   return {key:"in", label:"En course", rank:reached + 0.5};
 }
 
 /* ---------- Actions de la gérance ---------- */
-async function addTeam({name, p1, p2}){
+async function addTeam({name, p1, p2, tour}){
   name = (name || "").trim(); p1 = (p1 || "").trim(); p2 = (p2 || "").trim();
+  const t = tourById(tour);
+  if (!t) fail("Choisis le tournoi de l'équipe.");
   if (!name || !p1 || !p2) fail("Remplis le nom de l'équipe et les deux combattants.");
+  if (nameKey(p1) === nameKey(p2)) fail("Les deux combattants doivent être deux personnes différentes.");
   for (const p of [p1, p2]) if (isBlacklisted(p)) fail(p + " est sur la blacklist du Korin.");
-  if (S.matches.length) fail("Le tableau est déjà tiré. Réinitialise le tournoi pour ajouter une équipe.");
-  if (S.teams.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) fail("Une équipe porte déjà ce nom.");
-  await backend.insert("teams", [{id:uid(), name, player1:p1, player2:p2, created_at:now(), edition_id:needKorin()}]);
+  /* Si le combattant a un compte, son grade doit correspondre au tournoi */
+  for (const p of [p1, p2]){
+    const a = (accountList || []).find(x => nameKey(x.username) === nameKey(p));
+    if (a && a.grade && !gradeIn(a.grade, t)) fail(`${p} est ${a.grade} : le ${t.name} est réservé aux combattants de ce niveau (${gradeRange(t)}).`);
+  }
+  if (tourMatches(t.id).length) fail(`Le tableau du ${t.name} est déjà tiré. Retire-le pour ajouter une équipe.`);
+  if (S.teams.some(x => x.name.trim().toLowerCase() === name.toLowerCase())) fail("Une équipe porte déjà ce nom dans ce Korin.");
+  await backend.insert("teams", [{id:uid(), name, player1:p1, player2:p2, created_at:now(), edition_id:needKorin(), tournament_id:t.id}]);
   await reload();
 }
 
 async function deleteTeam(id){
-  if (S.matches.length) fail("Impossible de retirer une équipe après le tirage.");
+  if (tourMatches(tid(teamById(id))).length) fail("Impossible de retirer une équipe après le tirage de son tournoi.");
   await backend.remove("teams", id);
   await reload();
 }
 
+/* Tournois du Korin en cours */
+async function addTour(name, gmin, gmax){
+  const ed = needKorin();
+  gmin = gmin || null; gmax = gmax || null;
+  if (gmin && gmax && gradeIdx(gmin) > gradeIdx(gmax)) [gmin, gmax] = [gmax, gmin];
+  name = String(name || "").trim() || (gmin && gmin === gmax ? "Tournoi " + gmin : "");
+  if (!name) fail("Donne un nom au tournoi.");
+  if (S.tours.some(t => t.name.toLowerCase() === name.toLowerCase())) fail("Un tournoi porte déjà ce nom dans ce Korin.");
+  await backend.insert("tournaments", [{id:uid(), edition_id:ed, name, grade_min:gmin, grade_max:gmax, position:S.tours.length, created_at:now()}]);
+  await reload();
+}
+/* Un tournoi par grade, d'un coup (on supprime ensuite ceux qui ne servent pas) */
+async function addToursByGrade(){
+  const ed = needKorin();
+  const rows = GRADES.filter(g => !S.tours.some(t => t.grade_min === g && t.grade_max === g))
+    .map((g, i) => ({id:uid(), edition_id:ed, name:"Tournoi " + g, grade_min:g, grade_max:g, position:S.tours.length + i, created_at:now()}));
+  if (!rows.length) fail("Il y a déjà un tournoi pour chaque grade.");
+  await backend.insert("tournaments", rows);
+  await reload();
+}
+async function deleteTour(id){
+  if (!tourById(id)) fail("Tournoi introuvable.");
+  await backend.remove("tournaments", id);
+  if (selTour === id) selTour = "";
+  await reload();
+}
+
 /* Élimination directe. Les exemptions (s'il manque des équipes pour une puissance de 2) sont réparties dans tout le tableau. */
-function buildBracket(order){
+function buildBracket(order, tour = null){
   const n = order.length;
   if (n < 2) fail("Il faut au moins 2 équipes pour tirer le tableau.");
   let size = 1; while (size < n) size *= 2;
@@ -658,7 +742,7 @@ function buildBracket(order){
   const rows = [];
   for (let r = 1; r <= R; r++){
     for (let s = 0; s < size / Math.pow(2, r); s++){
-      rows.push({id:uid(), edition_id:S.cur ? S.cur.id : null, round:r, slot:s, team_a:null, team_b:null, odds_a:2, odds_b:2, winner:null, status:"a_venir", bye:false, decided_at:null});
+      rows.push({id:uid(), edition_id:S.cur ? S.cur.id : null, tournament_id:tour, round:r, slot:s, team_a:null, team_b:null, odds_a:2, odds_b:2, winner:null, status:"a_venir", bye:false, decided_at:null});
     }
   }
   const at = (r, s) => rows.find(x => x.round === r && x.slot === s);
@@ -680,11 +764,12 @@ function buildBracket(order){
   return rows;
 }
 
-async function drawBracket(order){
-  const rows = buildBracket(order);
-  const ed = needKorin();
-  await backend.clear("bets", ed);
-  await backend.clear("matches", ed);
+/* Tire (ou retire) le tableau d'un seul tournoi : ses anciens combats et leurs paris sont effacés (mises rendues) */
+async function drawBracket(tour, order){
+  needKorin();
+  if (!tourById(tour)) fail("Tournoi introuvable.");
+  const rows = buildBracket(order, tour);
+  await backend.clearTour("matches", tour);
   await backend.insert("matches", rows);
   await reload();
 }
@@ -717,7 +802,7 @@ async function declareWinner(id, teamId){
     const won = b.team_id === teamId;
     await backend.update("bets", b.id, won ? {status:"gagne", payout:Math.round(b.amount * b.odds)} : {status:"perdu", payout:0});
   }
-  const nx = S.matches.find(x => x.round === m.round + 1 && x.slot === Math.floor(m.slot / 2));
+  const nx = S.matches.find(x => tid(x) === tid(m) && x.round === m.round + 1 && x.slot === Math.floor(m.slot / 2));
   if (nx){
     const isA = m.slot % 2 === 0;
     const other = isA ? nx.team_b : nx.team_a;
@@ -731,7 +816,7 @@ async function declareWinner(id, teamId){
 async function undoResult(id){
   const m = matchById(id); if (!m) fail("Combat introuvable.");
   if (m.status !== "termine" || m.bye) fail("Ce combat n'a pas de résultat à annuler.");
-  const nx = S.matches.find(x => x.round === m.round + 1 && x.slot === Math.floor(m.slot / 2));
+  const nx = S.matches.find(x => tid(x) === tid(m) && x.round === m.round + 1 && x.slot === Math.floor(m.slot / 2));
   if (nx){
     if (nx.winner || S.bets.some(b => b.match_id === nx.id)) fail("Impossible : le combat suivant a déjà des paris ou un résultat.");
     await backend.update("matches", nx.id, m.slot % 2 === 0 ? {team_a:null, status:"a_venir"} : {team_b:null, status:"a_venir"});
@@ -846,27 +931,35 @@ async function deleteEdition(id){
 
 /* ---------- Données d'exemple (mode démo uniquement) ---------- */
 async function seedDemo(){
-  S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[], editions:[], cur:null, allTeams:[], allMatches:[], allBets:[]};
-  /* Un Korin déjà joué, pour l'historique */
+  S = {teams:[], matches:[], bets:[], totals:[], board:[], blacklist:[], editions:[], cur:null, allTeams:[], allMatches:[], allBets:[], tours:[], allTours:[]};
+  const r1 = t => tourMatches(t).filter(m => m.round === 1).sort((a, b) => a.slot - b.slot);
+  const bet = (m, list) => list.reduce((p, [bettor, side, amount]) => p.then(() => addBet({bettor, matchId:m.id, teamId:side === "a" ? m.team_a : m.team_b, amount})), Promise.resolve());
+
+  /* Un Korin déjà joué, pour l'historique : un seul tournoi Genin */
   await createEdition("Korin n°1", Date.now() - 30 * 864e5);
+  await addTour("Tournoi Genin", "Genin", "Genin");
+  const g1 = S.tours[0].id;
   for (const [name, p1, p2] of [["Lames du Désert", "Kenta Iwagami", "Hana Tsuchiya"], ["Croc d'Ambre", "Takeshi Ryūsa", "Emi Hoshizora"],
-    ["Vent Brûlant", "Haruto Shiraishi", "Akane Tsuchida"], ["Tempête d'Ocre", "Daisuke Hokori", "Mei Sunagawa"]]) await addTeam({name, p1, p2});
-  await drawBracket(S.teams.map(t => t.id));
-  const p1 = S.matches.filter(m => m.round === 1).sort((a, b) => a.slot - b.slot);
+    ["Vent Brûlant", "Haruto Shiraishi", "Akane Tsuchida"], ["Tempête d'Ocre", "Daisuke Hokori", "Mei Sunagawa"]]) await addTeam({name, p1, p2, tour:g1});
+  await drawBracket(g1, tourTeams(g1).map(t => t.id));
+  const p1 = r1(g1);
   await setOdds(p1[0].id, 1.7, 2.2); await setOdds(p1[1].id, 2.5, 1.5);
-  for (const [bettor, i, side, amount] of [["Ryūji", 0, "a", 200], ["Kasumi", 0, "b", 300], ["Tetsuo", 1, "b", 400], ["Gorō", 1, "a", 150]])
-    await addBet({bettor, matchId:p1[i].id, teamId:side === "a" ? p1[i].team_a : p1[i].team_b, amount});
+  await bet(p1[0], [["Ryūji", "a", 200], ["Kasumi", "b", 300]]);
+  await bet(p1[1], [["Tetsuo", "b", 400], ["Gorō", "a", 150]]);
   await declareWinner(p1[0].id, p1[0].team_a); await declareWinner(p1[1].id, p1[1].team_b);
-  const fin = S.matches.find(m => m.round === 2);
+  const fin = tourMatches(g1).find(m => m.round === 2);
   await setOdds(fin.id, 1.9, 1.9);
-  await addBet({bettor:"Kasumi", matchId:fin.id, teamId:fin.team_a, amount:250});
-  await addBet({bettor:"Tetsuo", matchId:fin.id, teamId:fin.team_b, amount:300});
+  await bet(fin, [["Kasumi", "a", 250], ["Tetsuo", "b", 300]]);
   await declareWinner(fin.id, fin.team_a);
   await closeEdition();
   await backend.update("editions", S.editions[0].id, {ended_at:new Date(Date.now() - 29 * 864e5).toISOString()});
   histEd = "";
-  /* Le Korin en cours */
+
+  /* Le Korin en cours : un tournoi Genin (8 équipes) et un tournoi Jonin (4 équipes) */
   await createEdition("Korin n°2", Date.now() - 864e5);
+  await addTour("Tournoi Genin", "Genin", "Genin");
+  await addTour("Tournoi Jonin", "Jonin", "Jonin");
+  const [gen, jon] = S.tours.map(t => t.id);
   const teams = [
     ["Les Scorpions Rouges", "Akio Sabaku", "Rin Kazeno"],
     ["Tempête d'Ocre", "Daisuke Hokori", "Mei Sunagawa"],
@@ -877,24 +970,26 @@ async function seedDemo(){
     ["Fils du Mirage", "Ren Kagerō", "Aiko Minase"],
     ["Sceau Écarlate", "Jun Takasuna", "Kaori Fūma"]
   ];
-  for (const [name, p1, p2] of teams) await addTeam({name, p1, p2});
-  await drawBracket(S.teams.map(t => t.id));
-  const r1 = S.matches.filter(m => m.round === 1).sort((a, b) => a.slot - b.slot);
-  const odds = [[1.6, 2.4], [2.1, 1.75], [3.2, 1.35], [1.9, 1.9]];
-  for (let i = 0; i < 4; i++) await setOdds(r1[i].id, odds[i][0], odds[i][1]);
-  const bets = [
-    ["Ryūji", 0, "a", 300], ["Kasumi", 0, "b", 150], ["Tetsuo", 1, "b", 500], ["Natsuki", 1, "a", 200],
-    ["Gorō", 2, "a", 120], ["Kasumi", 2, "b", 400], ["Ryūji", 3, "b", 250], ["Natsuki", 3, "a", 250], ["Tetsuo", 0, "a", 100]
-  ];
-  for (const [bettor, i, side, amount] of bets)
-    await addBet({bettor, matchId:r1[i].id, teamId:side === "a" ? r1[i].team_a : r1[i].team_b, amount});
-  await declareWinner(r1[0].id, r1[0].team_a);
-  await declareWinner(r1[1].id, r1[1].team_b);
-  await setStatus(r1[2].id, "ferme");
-  const sf = S.matches.find(m => m.round === 2 && m.slot === 0);
+  for (const [name, p1, p2] of teams) await addTeam({name, p1, p2, tour:gen});
+  for (const [name, p1, p2] of [["Ombre du Kazekage", "Gaara Sabakuno", "Temari Kaze"], ["Sable Noir", "Kankurō Ito", "Baki Fūjin"],
+    ["Œil du Désert", "Pakura Shakuton", "Rasa Kogane"], ["Lune de Suna", "Chiyo Kugutsu", "Ebizō Umi"]]) await addTeam({name, p1, p2, tour:jon});
+  await drawBracket(gen, tourTeams(gen).map(t => t.id));
+  await drawBracket(jon, tourTeams(jon).map(t => t.id));
+  const g = r1(gen), odds = [[1.6, 2.4], [2.1, 1.75], [3.2, 1.35], [1.9, 1.9]];
+  for (let i = 0; i < 4; i++) await setOdds(g[i].id, odds[i][0], odds[i][1]);
+  await bet(g[0], [["Ryūji", "a", 300], ["Kasumi", "b", 150], ["Tetsuo", "a", 100]]);
+  await bet(g[1], [["Tetsuo", "b", 500], ["Natsuki", "a", 200]]);
+  await bet(g[2], [["Gorō", "a", 120], ["Kasumi", "b", 400]]);
+  await bet(g[3], [["Ryūji", "b", 250], ["Natsuki", "a", 250]]);
+  await declareWinner(g[0].id, g[0].team_a);
+  await declareWinner(g[1].id, g[1].team_b);
+  await setStatus(g[2].id, "ferme");
+  const sf = tourMatches(gen).find(m => m.round === 2 && m.slot === 0);
   await setOdds(sf.id, 1.8, 2.05);
-  await addBet({bettor:"Kasumi", matchId:sf.id, teamId:sf.team_b, amount:350});
-  await addBet({bettor:"Gorō", matchId:sf.id, teamId:sf.team_a, amount:180});
+  await bet(sf, [["Kasumi", "b", 350], ["Gorō", "a", 180]]);
+  const j = r1(jon);
+  await setOdds(j[0].id, 1.5, 2.6);
+  await bet(j[0], [["Natsuki", "a", 400], ["Ryūji", "b", 200]]);
 }
 
 /* ---------- Morceaux d'interface ---------- */
@@ -923,7 +1018,7 @@ function side(m, k){
 function duel(m){
   const st = stake(m.id), total = st.total, bs = {length:st.n};
   return `<article class="duel">
-    <div class="duel-head"><span class="eyebrow">${esc(roundName(m.round))}</span>${pill(m)}</div>
+    <div class="duel-head"><span class="eyebrow">${esc(matchLabel(m))}</span>${pill(m)}</div>
     ${side(m, "a")}<div class="vs">VS</div>${side(m, "b")}
     <div class="duel-foot">${plural(bs.length, "pari")} · ${fmt(total)} ryos en jeu</div>
   </article>`;
@@ -982,6 +1077,14 @@ function pendingNotice(){
     <button class="btn" data-act="gtab" data-g="validation">Voir les demandes</button></div></section>`;
 }
 
+/* Champions de chaque tournoi (panneau doré), pour l'Aperçu et l'historique */
+function championsPanel(title){
+  const cs = tourList().map(t => ({t, c:champion(t.id)})).filter(x => x.c);
+  return !cs.length ? "" : `<div class="panel" style="text-align:center;border-color:var(--gold);margin-top:22px"><span class="eyebrow">${title}</span>
+    ${cs.map(({t, c}) => `<div class="crown" style="border:0;background:none;padding:10px 0 0">${cs.length > 1 || S.tours.length > 1 ? `<span class="eyebrow">${esc(t.name)}</span>` : ""}
+      <strong>${esc(c.name)}</strong><span>${esc(c.player1)} & ${esc(c.player2)}</span></div>`).join("")}</div>`;
+}
+
 /* Gérance → Aperçu : chiffres clés, avec le détail des paris (réservé à la gérance) */
 function gApercu(){
   if (!S.cur) return pendingNotice() + korinPanel();
@@ -989,13 +1092,14 @@ function gApercu(){
   const pend = S.bets.filter(b => b.status === "en_cours");
   const open = S.matches.filter(m => m.status === "ouvert");
   const done = S.matches.filter(m => m.status === "termine" && !m.bye).sort((a, b) => (b.decided_at || "").localeCompare(a.decided_at || "")).slice(0, 4);
-  const c = champion();
   const accts = accountList || [];
   return `${pendingNotice()}${korinPanel()}
-  ${c ?`<div class="panel" style="text-align:center;border-color:var(--gold);margin-top:22px"><span class="eyebrow">Champions du Korin</span>
-    <div class="crown" style="border:0;background:none;padding:6px 0 0"><strong>${esc(c.name)}</strong><span>${esc(c.player1)} & ${esc(c.player2)}</span></div></div>` : ""}
+  ${S.tours.length ? "" : `<section class="sec"><div class="panel wallet" style="border-color:var(--gold)"><div><b>Aucun tournoi dans ce Korin.</b>
+    <p class="hint" style="margin-top:4px">Crée les tournois (un par grade) avant d'inscrire les équipes.</p></div>
+    <button class="btn" data-act="gtab" data-g="tournois">Créer les tournois</button></div></section>`}
+  ${championsPanel("Champions du Korin")}
   <div class="stats">
-    <div class="stat"><div class="eyebrow">Équipes en course</div><div class="v">${inRace}<small>sur ${S.teams.length}</small></div></div>
+    <div class="stat"><div class="eyebrow">Tournois · équipes en course</div><div class="v">${S.tours.length}<small>· ${inRace} sur ${S.teams.length}</small></div></div>
     <div class="stat"><div class="eyebrow">Paris en cours</div><div class="v">${pend.length}</div></div>
     <div class="stat"><div class="eyebrow">Ryos en jeu</div><div class="v">${fmt(pend.reduce((s, b) => s + b.amount, 0))}<small>両</small></div></div>
   </div>
@@ -1017,24 +1121,33 @@ function gApercu(){
   </section>`;
 }
 
-function vTableau(){
-  if (!S.matches.length){
-    return `<div class="sec-head"><div><h1 class="pt"><span class="k">闘</span>Tableau du tournoi</h1></div></div>
-      ${emptyBox("闘", `Le tableau n'est pas encore tiré. ${plural(S.teams.length, "équipe inscrite", "équipes inscrites")} pour l'instant.`)}`;
-  }
-  const inRace = S.teams.filter(t => teamStatus(t.id).key !== "out").length;
-  return `<div class="sec-head"><div><h1 class="pt"><span class="k">闘</span>Tableau du tournoi</h1>
-    <p class="sub">${esc(S.cur.name)} · élimination directe en 2 contre 2. ${plural(inRace, "équipe encore en course", "équipes encore en course")} sur ${S.teams.length}.</p></div></div>
-    ${bracketHtml()}`;
+/* Boutons pour passer d'un tournoi à l'autre (seulement s'il y en a plusieurs) */
+function tourChips(list, cur){
+  return list.length < 2 ? "" : `<div class="row gnav" role="tablist" aria-label="Tournois" style="margin-bottom:18px">${list.map(t =>
+    `<button class="btn sm ${t.id === cur ? "" : "ghost"}" data-act="tour-sel" data-id="${t.id || ""}" aria-pressed="${t.id === cur}">${esc(t.name)}</button>`).join("")}</div>`;
 }
 
-/* Le tableau lui-même (réutilisé dans l'historique de la gérance) */
-function bracketHtml(){
-  const R = totalRounds(), c = champion();
+function vTableau(){
+  const list = tourList().filter(t => tourTeams(t.id).length || tourMatches(t.id).length);
+  if (!list.length) return `<div class="sec-head"><div><h1 class="pt"><span class="k">闘</span>Tableau du tournoi</h1></div></div>
+    ${emptyBox("闘", "Aucune équipe inscrite pour l'instant.")}`;
+  const t = list.find(x => x.id === (selTour || null)) || list[0];
+  const teams = tourTeams(t.id), inRace = teams.filter(x => teamStatus(x.id).key !== "out").length;
+  return `<div class="sec-head"><div><h1 class="pt"><span class="k">闘</span>Tableau du tournoi</h1>
+    <p class="sub">${esc(S.cur.name)} · ${list.length > 1 ? "un tournoi par grade, " : ""}élimination directe en 2 contre 2.</p></div></div>
+    ${tourChips(list, t.id)}
+    <div class="sec-head"><div><h2>${esc(t.name)}</h2><p class="sub">${esc(gradeRange(t))} · ${tourMatches(t.id).length
+      ? plural(inRace, "équipe encore en course", "équipes encore en course") + " sur " + teams.length : plural(teams.length, "équipe inscrite", "équipes inscrites")}.</p></div></div>
+    ${tourMatches(t.id).length ? bracketHtml(t.id) : emptyBox("闘", "Le tableau de ce tournoi n'est pas encore tiré.")}`;
+}
+
+/* Le tableau d'un tournoi (réutilisé dans l'historique de la gérance) */
+function bracketHtml(t){
+  const R = totalRounds(t), c = champion(t);
   let cols = "";
   for (let r = 1; r <= R; r++){
-    const ms = S.matches.filter(m => m.round === r).sort((a, b) => a.slot - b.slot);
-    cols += `<div class="round"><h3>${esc(roundName(r))}</h3><div class="round-list">${ms.map(bm).join("")}</div></div>`;
+    const ms = tourMatches(t).filter(m => m.round === r).sort((a, b) => a.slot - b.slot);
+    cols += `<div class="round"><h3>${esc(roundName(r, t))}</h3><div class="round-list">${ms.map(bm).join("")}</div></div>`;
   }
   cols += `<div class="round"><h3>Vainqueur</h3><div class="round-list"><div class="crown">
     <div class="kj">頂</div>${c ? `<strong>${esc(c.name)}</strong><span>${esc(c.player1)} & ${esc(c.player2)}</span>` : `<strong>?</strong><span>Le sable n'a pas encore tranché</span>`}
@@ -1053,48 +1166,83 @@ function bm(m){
   return `<div class="bm ${m.status === "ouvert" ? "open" : ""}">${line("a")}${line("b")}<div class="bm-st">${st}</div></div>`;
 }
 
-function teamLists(canDelete){
-  const drawn = S.matches.length > 0;
-  const card = t => {
-    const st = teamStatus(t.id);
+/* Les équipes d'un tournoi, en course puis éliminées */
+function teamLists(canDelete, t){
+  const teams = tourTeams(t), drawn = tourMatches(t).length > 0;
+  const card = x => {
+    const st = teamStatus(x.id);
     const chip = {inscrite:'<span class="pill p-wait">Inscrite</span>', in:'<span class="pill p-in">En course</span>',
       champ:'<span class="pill p-champ">Championne</span>', out:`<span class="pill p-done">${esc(st.label)}</span>`}[st.key];
     return `<div class="team ${st.key === "out" ? "out" : ""}">
-      <div class="nm">${esc(t.name)}</div>
-      <div class="pl">${esc(t.player1)}<em>×</em>${esc(t.player2)}</div>
-      <div class="team-foot">${chip}${canDelete ? `<button class="btn danger sm" data-act="del-team" data-id="${t.id}" data-confirm="Retirer ?">Retirer</button>` : ""}</div>
+      <div class="nm">${esc(x.name)}</div>
+      <div class="pl">${esc(x.player1)}<em>×</em>${esc(x.player2)}</div>
+      <div class="team-foot">${chip}${canDelete && !drawn ? `<button class="btn danger sm" data-act="del-team" data-id="${x.id}" data-confirm="Retirer ?">Retirer</button>` : ""}</div>
     </div>`;
   };
-  if (!S.teams.length) return `<section class="sec">${emptyBox("組", "Aucune équipe inscrite pour l'instant.")}</section>`;
-  if (!drawn) return `<section class="sec"><div class="sec-head"><h2>Inscrites · ${S.teams.length}</h2></div><div class="teams">${S.teams.map(card).join("")}</div></section>`;
-  const ins = S.teams.filter(t => teamStatus(t.id).key !== "out").sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank);
-  const outs = S.teams.filter(t => teamStatus(t.id).key === "out").sort((a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank);
-  return `<section class="sec"><div class="sec-head"><h2>Encore en course · ${ins.length}</h2></div>
-      ${ins.length ? `<div class="teams">${ins.map(card).join("")}</div>` : emptyBox("砂", "Plus aucune équipe en course.")}</section>
-    <section class="sec"><div class="sec-head"><h2>Éliminées · ${outs.length}</h2></div>
-      ${outs.length ? `<div class="teams">${outs.map(card).join("")}</div>` : emptyBox("砂", "Aucune équipe éliminée pour l'instant.")}</section>`;
+  if (!teams.length) return emptyBox("組", "Aucune équipe inscrite dans ce tournoi.");
+  if (!drawn) return `<div class="teams">${teams.map(card).join("")}</div>`;
+  const by = (a, b) => teamStatus(b.id).rank - teamStatus(a.id).rank;
+  const ins = teams.filter(x => teamStatus(x.id).key !== "out").sort(by), outs = teams.filter(x => teamStatus(x.id).key === "out").sort(by);
+  return `<h3 class="eyebrow" style="margin:0 0 10px">Encore en course · ${ins.length}</h3>
+      ${ins.length ? `<div class="teams">${ins.map(card).join("")}</div>` : emptyBox("砂", "Plus aucune équipe en course.")}
+    ${outs.length ? `<h3 class="eyebrow" style="margin:18px 0 10px">Éliminées · ${outs.length}</h3><div class="teams">${outs.map(card).join("")}</div>` : ""}`;
+}
+/* Toutes les équipes, tournoi par tournoi */
+function teamsByTour(canDelete){
+  const list = tourList().filter(t => canDelete || tourTeams(t.id).length);
+  if (!list.length) return `<section class="sec">${emptyBox("組", "Aucune équipe inscrite pour l'instant.")}</section>`;
+  return list.map(t => `<section class="sec"><div class="sec-head"><div><h2>${esc(t.name)} · ${tourTeams(t.id).length}</h2>
+      <p class="sub">${esc(gradeRange(t))}${tourMatches(t.id).length ? " · tableau tiré" : ""}</p></div></div>${teamLists(canDelete, t.id)}</section>`).join("");
 }
 
 function vEquipes(){
   return `<div class="sec-head"><div><h1 class="pt"><span class="k">組</span>Équipes</h1>
-      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}. Une équipe = deux combattants, inscrite par la gérance du Korin.</p></div></div>
-    ${teamLists(false)}`;
+      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}. Une équipe = deux combattants du même niveau, inscrite par la gérance dans le tournoi de son grade.</p></div></div>
+    ${teamsByTour(false)}`;
 }
 
-/* Gérance → Équipes : inscription et retrait (avant le tirage) */
+/* Gérance → Équipes : inscription dans un tournoi (avant le tirage de ce tournoi) et retrait */
 function gEquipes(){
-  const drawn = S.matches.length > 0;
-  const form = drawn
-    ? `<p class="hint">Le tableau est tiré : les inscriptions sont closes. Pour en rouvrir, retire le tableau ou réinitialise le tournoi dans Gérance → Combats.</p>`
+  const open = S.tours.filter(t => !tourMatches(t.id).length);
+  const form = !S.tours.length
+    ? `<div class="panel wallet"><div><b>Aucun tournoi dans ce Korin.</b><p class="hint" style="margin-top:4px">Crée d'abord les tournois (un par grade).</p></div>
+        <button class="btn" data-act="gtab" data-g="tournois">Créer les tournois</button></div>`
+    : !open.length ? `<p class="hint">Tous les tableaux sont tirés : les inscriptions sont closes. Pour en rouvrir une, retire le tableau du tournoi dans Gérance → Combats.</p>`
     : `<form class="form" id="team-form" data-form="team">
+        <label class="f"><span class="eyebrow">Tournoi</span><select id="tf-tour">${open.map(t => `<option value="${t.id}"${t.id === lastTour ? " selected" : ""}>${esc(t.name)} · ${esc(gradeRange(t))}</option>`).join("")}</select></label>
         <label class="f"><span class="eyebrow">Nom de l'équipe</span><input id="tf-name" maxlength="60" required></label>
         <label class="f"><span class="eyebrow">Combattant 1</span><input id="tf-p1" maxlength="60" required></label>
         <label class="f"><span class="eyebrow">Combattant 2</span><input id="tf-p2" maxlength="60" required></label>
         <button class="btn" type="submit">Inscrire l'équipe</button>
       </form>`;
   return `<section class="sec"><div class="sec-head"><div><h2>Inscrire une équipe</h2>
-      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}. Les combattants blacklistés sont refusés.</p></div></div>${form}</section>
-    ${teamLists(!drawn)}`;
+      <p class="sub">${plural(S.teams.length, "équipe inscrite", "équipes inscrites")}. Choisis le tournoi du grade des combattants : si un combattant a un compte avec un autre grade, l'inscription est refusée. Les blacklistés sont refusés aussi.</p></div></div>${form}</section>
+    ${teamsByTour(true)}`;
+}
+
+/* Gérance → Tournois : un tournoi par grade, pour que les combattants s'affrontent entre eux du même niveau */
+function gTournois(){
+  const missing = GRADES.filter(g => !S.tours.some(t => t.grade_min === g && t.grade_max === g));
+  return `<section class="sec"><div class="sec-head"><div><h2><span class="k">闘</span>Tournois de ${esc(S.cur.name)} · ${S.tours.length}</h2>
+      <p class="sub">Chaque tournoi a ses équipes, son tableau et ses champions : Genin contre Genin, Chunin contre Chunin… Supprime ceux qui ne servent pas.</p></div></div>
+    ${missing.length ? `<div class="panel wallet" style="margin-bottom:16px"><div><b>Un tournoi par grade</b><p class="hint" style="margin-top:4px">Crée d'un coup ${plural(missing.length, "tournoi")} : ${esc(missing.join(", "))}.</p></div>
+      <button class="btn" data-act="tour-grades">Créer un tournoi par grade</button></div>` : ""}
+    ${S.tours.length ? `<div class="tbl-wrap"><table><thead><tr><th>Tournoi</th><th>Grade</th><th class="num">Équipes</th><th>Tableau</th><th></th></tr></thead><tbody>
+      ${S.tours.map(t => { const ms = tourMatches(t.id), c = champion(t.id); return `<tr><td class="who">${esc(t.name)}</td><td>${esc(gradeRange(t))}</td>
+        <td class="num">${tourTeams(t.id).length}</td>
+        <td>${c ? `<span class="pill p-champ">${esc(c.name)}</span>` : ms.length ? '<span class="pill p-in">Tiré</span>' : '<span class="pill p-wait">Pas encore tiré</span>'}</td>
+        <td class="num"><button class="btn danger sm" data-act="tour-del" data-id="${t.id}" data-confirm="${tourTeams(t.id).length ? "Confirmer : équipes et paris effacés" : "Confirmer"}">Supprimer</button></td></tr>`; }).join("")}
+    </tbody></table></div>` : emptyBox("闘", "Aucun tournoi pour l'instant.")}
+  </section>
+  <section class="sec"><div class="sec-head"><div><h2>Créer un tournoi à la main</h2>
+      <p class="sub">Pour un grade précis, ou une tranche de grades (de… à…). Le nom est facultatif : « Tournoi Chunin » par exemple.</p></div></div>
+    <form class="form" data-form="tour-add">
+      <label class="f"><span class="eyebrow">Nom (facultatif)</span><input id="tr-name" maxlength="60" placeholder="Ex. Tournoi Chunin"></label>
+      <label class="f"><span class="eyebrow">Grade (de)</span>${gradeSelect("tr-min", "", true)}</label>
+      <label class="f"><span class="eyebrow">Jusqu'à (facultatif)</span>${gradeSelect("tr-max", "", true)}</label>
+      <button class="btn" type="submit">Créer le tournoi</button>
+    </form>
+    <p class="hint">Supprimer un tournoi efface aussi ses équipes, son tableau et ses paris (mises en cours rendues).</p></section>`;
 }
 
 function betRows(list, withDelete){
@@ -1105,7 +1253,7 @@ function betRows(list, withDelete){
       : `<span class="mut">${fmt(Math.round(b.amount * b.odds))} possibles</span>`;
     return `<tr>
       <td class="who">${esc(b.bettor)}</td>
-      <td>${m ? esc(vsLabel(m)) : "—"}<div class="mut" style="font-size:12.5px">${m ? esc(roundName(m.round)) : ""}</div></td>
+      <td>${m ? esc(vsLabel(m)) : "—"}<div class="mut" style="font-size:12.5px">${m ? esc(matchLabel(m)) : ""}</div></td>
       <td>${esc(tName(b.team_id))}</td>
       <td class="num">${fmt(b.amount)}</td>
       <td class="num">${fOdds(b.odds)}</td>
@@ -1130,7 +1278,7 @@ function betFormHtml(forOthers){
   }
   return `<form class="form" id="bet-form" data-form="bet">
       ${who}
-      <label class="f"><span class="eyebrow">Combat</span><select id="bet-match">${open.map(m => `<option value="${m.id}">${esc(roundName(m.round))} · ${esc(vsLabel(m))}</option>`).join("")}</select></label>
+      <label class="f"><span class="eyebrow">Combat</span><select id="bet-match">${open.map(m => `<option value="${m.id}">${esc(matchLabel(m))} · ${esc(vsLabel(m))}</option>`).join("")}</select></label>
       <label class="f"><span class="eyebrow">Équipe choisie</span><select id="bet-team"></select></label>
       <label class="f"><span class="eyebrow">Mise (ryos)</span><input id="bf-amount" type="number" min="1" step="1" inputmode="numeric" required></label>
       <p class="gain full" id="bet-gain">Gain possible : <b>—</b></p>
@@ -1182,8 +1330,9 @@ function gParis(){
 
 /* Gérance → Paris : pour chaque combat du Korin en cours, qui a parié sur chaque équipe */
 function whoBetOnWho(){
+  const pos = m => S.tours.findIndex(t => t.id === tid(m));
   const ms = S.matches.filter(m => !m.bye && m.team_a && m.team_b && S.bets.some(b => b.match_id === m.id))
-    .sort((a, b) => a.round - b.round || a.slot - b.slot);
+    .sort((a, b) => pos(a) - pos(b) || a.round - b.round || a.slot - b.slot);
   const res = b => b.status === "gagne" ? `<span class="pos">+${fmt(b.payout - b.amount)}</span>` : b.status === "perdu" ? `<span class="neg">−${fmt(b.amount)}</span>` : "";
   const side = (m, id) => {
     const bs = S.bets.filter(b => b.match_id === m.id && b.team_id === id).sort((a, b) => b.amount - a.amount);
@@ -1199,7 +1348,7 @@ function whoBetOnWho(){
   return `<section class="sec"><div class="sec-head"><div><h2><span class="k">賭</span>Qui a parié sur qui</h2>
       <p class="sub">Tous les paris du Korin en cours, combat par combat : mise et cote de chaque parieur.</p></div></div>
     ${ms.length ? `<div class="duels">${ms.map(m => `<article class="duel">
-      <div class="duel-head"><span class="eyebrow">${esc(roundName(m.round))}</span>${pill(m)}</div>
+      <div class="duel-head"><span class="eyebrow">${esc(matchLabel(m))}</span>${pill(m)}</div>
       ${side(m, m.team_a)}<div class="vs">VS</div>${side(m, m.team_b)}
     </article>`).join("")}</div>` : emptyBox("賭", "Aucun pari sur ce Korin pour l'instant.")}</section>`;
 }
@@ -1241,7 +1390,7 @@ function vClassement(){
     ${mine ? `<div class="panel wallet" style="border-color:var(--gold);margin-bottom:22px"><div><div class="eyebrow">Tes points · ${esc(mine.name)}</div>
         <div class="v">${plural(mine.points, "point")}</div></div><div class="eyebrow">Rang ${mine.rank} sur ${list.length}</div></div>`
       : S.me ? `<p class="hint">Ton nom de compte (${esc(S.me.username)}) ne correspond à aucun combattant inscrit dans un Korin pour l'instant.</p>` : ""}
-    ${list.length ? `<div class="tbl-wrap"><table><thead><tr><th></th><th>Combattant</th><th class="num">Points</th><th class="num">Défaites</th><th class="num">Korin joués</th><th class="num">Korin gagnés</th></tr></thead><tbody>
+    ${list.length ? `<div class="tbl-wrap"><table><thead><tr><th></th><th>Combattant</th><th class="num">Points</th><th class="num">Défaites</th><th class="num">Korin joués</th><th class="num">Titres</th></tr></thead><tbody>
       ${list.map(o => `<tr${mine && o.key === mine.key ? ' style="background:rgba(214,178,124,.10)"' : ""}>
         <td class="rank ${o.rank <= 3 ? "" : "n"}">${o.rank <= 3 ? kj[o.rank - 1] : o.rank}</td>
         <td class="who">${esc(o.name)}${mine && o.key === mine.key ? ' <span class="mut">(toi)</span>' : ""}</td>
@@ -1257,13 +1406,11 @@ function editionStats(ed){
   const bets = S.allBets.filter(x => x.edition_id === ed);
   const settled = bets.filter(b => b.status !== "en_cours");
   const staked = settled.reduce((s, b) => s + b.amount, 0), paid = settled.reduce((s, b) => s + b.payout, 0);
-  const R = matches.reduce((a, m) => Math.max(a, m.round), 0);
-  const fin = matches.find(m => m.round === R && m.slot === 0);
-  return {teams, matches, bets, staked, paid, house:staked - paid,
+  const champs = withEdition(ed, () => tourList().map(t => ({tour:t.name, team:champion(t.id)})).filter(x => x.team));
+  return {teams, matches, bets, staked, paid, house:staked - paid, champs,
     played:matches.filter(m => m.status === "termine" && !m.bye).length,
     pending:bets.filter(b => b.status === "en_cours").reduce((s, b) => s + b.amount, 0),
-    bettors:new Set(bets.map(b => nameKey(b.bettor))).size,
-    champ:fin && fin.winner ? teams.find(t => t.id === fin.winner) : null};
+    bettors:new Set(bets.map(b => nameKey(b.bettor))).size};
 }
 function edPill(e){
   if (e.ended_at) return '<span class="pill p-done">Terminé</span>';
@@ -1287,7 +1434,7 @@ function histList(){
     </div>
     <div class="tbl-wrap" style="margin-top:22px"><table><thead><tr><th>Korin</th><th>Ouverture</th><th>Clôture</th><th>Champions</th><th class="num">Équipes</th><th class="num">Combats</th><th class="num">Paris</th><th class="num">Misé</th><th class="num">Versé</th><th class="num">Gérance</th><th></th></tr></thead><tbody>
       ${all.map(({e, st}) => `<tr><td class="who">${esc(e.name)} ${edPill(e)}</td><td class="mut">${fDay(e.starts_at)}</td><td class="mut">${fDay(e.ended_at)}</td>
-        <td>${st.champ ? `<b class="pos">${esc(st.champ.name)}</b>` : '<span class="mut">—</span>'}</td>
+        <td>${st.champs.length ? st.champs.map(x => `<b class="pos">${esc(x.team.name)}</b>${st.champs.length > 1 ? ` <span class="mut" style="font-size:12.5px">${esc(x.tour)}</span>` : ""}`).join("<br>") : '<span class="mut">—</span>'}</td>
         <td class="num">${st.teams.length}</td><td class="num">${st.played}</td><td class="num">${st.bets.length}</td>
         <td class="num">${fmt(st.staked)}</td><td class="num">${fmt(st.paid)}</td><td class="num ${balCls(st.house)}"><b>${fmtSigned(st.house)}</b></td>
         <td class="num"><div class="adj"><button class="btn ghost sm" data-act="hist-ed" data-id="${e.id}">Voir</button>
@@ -1303,8 +1450,7 @@ function histDetail(e){
   return `<section class="sec"><div class="row" style="margin-bottom:14px"><button class="btn ghost sm" data-act="hist-ed" data-id="">← Tous les Korin</button></div>
     <div class="sec-head"><div><h2><span class="k">史</span>${esc(e.name)} ${edPill(e)}</h2>
       <p class="sub">Ouverture ${esc(fDate(e.starts_at))}${e.ended_at ? ` · clôture ${esc(fDate(e.ended_at))}` : ""}</p></div></div>
-    ${st.champ ? `<div class="panel" style="text-align:center;border-color:var(--gold)"><span class="eyebrow">Champions</span>
-      <div class="crown" style="border:0;background:none;padding:6px 0 0"><strong>${esc(st.champ.name)}</strong><span>${esc(st.champ.player1)} & ${esc(st.champ.player2)}</span></div></div>` : ""}
+    ${withEdition(e.id, () => championsPanel("Champions"))}
     <div class="stats">
       <div class="stat"><div class="eyebrow">Équipes</div><div class="v">${st.teams.length}</div></div>
       <div class="stat"><div class="eyebrow">Combats joués</div><div class="v">${st.played}</div></div>
@@ -1318,13 +1464,12 @@ function histDetail(e){
     ${st.pending ? `<p class="hint">${fmt(st.pending)} ryos sont encore misés sur des combats non terminés.</p>` : ""}
   </section>
   ${withEdition(e.id, () => `
-    <section class="sec"><div class="sec-head"><h2><span class="k">闘</span>Tableau</h2></div>
-      ${S.matches.length ? bracketHtml() : emptyBox("闘", "Le tableau n'a pas été tiré.")}</section>
+    ${tourList().filter(t => tourTeams(t.id).length).map(t => `<section class="sec"><div class="sec-head"><div><h2><span class="k">闘</span>${esc(t.name)}</h2><p class="sub">${esc(gradeRange(t))}</p></div></div>
+      ${tourMatches(t.id).length ? bracketHtml(t.id) : emptyBox("闘", "Le tableau de ce tournoi n'a pas été tiré.")}</section>`).join("") || `<section class="sec">${emptyBox("闘", "Aucun tournoi dans ce Korin.")}</section>`}
     <section class="sec"><div class="sec-head"><h2><span class="k">番</span>Classement des parieurs de ce Korin</h2></div>
       ${rankTable(computeBoard(S.bets).map(o => ({...o, net:o.returned - o.staked})).sort((a, b) => b.net - a.net || a.name.localeCompare(b.name, "fr")))}</section>
     ${histCombats()}
-    <section class="sec"><div class="sec-head"><h2><span class="k">組</span>Équipes</h2></div></section>
-    ${teamLists(false)}`)}
+    ${teamsByTour(false)}`)}
   ${e.ended_at ? `<section class="sec"><div class="panel danger-zone"><p>Supprimer ce Korin efface définitivement ses équipes, combats et paris de l'historique. Les bilans des joueurs ne changent pas.</p>
     <button class="btn danger" data-act="ed-del" data-id="${e.id}" data-confirm="Confirmer : supprimer ce Korin">Supprimer ce Korin de l'historique</button></div></section>` : ""}`;
 }
@@ -1345,7 +1490,7 @@ function histCombats(){
     <section class="sec"><div class="sec-head"><h2>Combats joués · ${done.length}</h2></div>
     ${done.length ? `<div class="tbl-wrap"><table><thead><tr><th>Tour</th><th>Vainqueur</th><th>Battue</th><th class="num">Cote du vainqueur</th><th class="num">Paris</th><th class="num">Date</th></tr></thead><tbody>
       ${done.map(m => { const lose = m.winner === m.team_a ? m.team_b : m.team_a; const o = m.winner === m.team_a ? m.odds_a : m.odds_b; return `<tr>
-        <td class="mut">${esc(roundName(m.round))}</td><td class="who pos">${esc(tName(m.winner))}</td><td class="mut">${esc(tName(lose))}</td>
+        <td class="mut">${esc(matchLabel(m))}</td><td class="who pos">${esc(tName(m.winner))}</td><td class="mut">${esc(tName(lose))}</td>
         <td class="num">${fOdds(o)}</td><td class="num">${S.bets.filter(b => b.match_id === m.id).length}</td><td class="num mut">${dt(m.decided_at)}</td></tr>`; }).join("")}
     </tbody></table></div>` : emptyBox("史", q ? "Aucun combat ne correspond à ce filtre." : "Aucun combat joué pour l'instant.")}
     </section>
@@ -1417,10 +1562,7 @@ function vOrga(){
   if (backend.mode === "live" && !backend.isAdmin){
     return head + `<div class="panel"><p>Connecté en tant que <b>${esc(backend.username)}</b>. Ce compte ne fait pas partie de la gérance.</p></div>`;
   }
-  const n = S.teams.length;
-  let size = 1; while (size < n) size *= 2;
-  const drawn = S.matches.length > 0;
-  const tabs = GTABS.filter(([k]) => (backend.mode === "live" || !["comptes", "validation"].includes(k)) && (S.cur || !["combats", "equipes", "paris"].includes(k)));
+  const tabs = GTABS.filter(([k]) => (backend.mode === "live" || !["comptes", "validation"].includes(k)) && (S.cur || !["tournois", "combats", "equipes", "paris"].includes(k)));
   if (!tabs.some(([k]) => k === gTab)) gTab = "apercu";
   const pending = (accountList || []).filter(a => a.grade_pending);
   const nav = `<div class="row gnav" role="tablist" aria-label="Sections de la gérance">${tabs.map(([k, l]) =>
@@ -1509,39 +1651,41 @@ function vOrga(){
     </tbody></table></div>` : `<div style="margin-top:14px">${emptyBox("禁", "Personne n'est blacklisté.")}</div>`}
   </section>`;
 
-  const manage = !drawn ? "" : (() => {
-    let out = "";
-    for (let r = 1; r <= totalRounds(); r++){
-      const ms = S.matches.filter(m => m.round === r && !m.bye).sort((a, b) => a.slot - b.slot);
-      if (!ms.length) continue;
-      out += `<h3 class="eyebrow" style="margin:22px 0 10px">${esc(roundName(r))}</h3><div class="mlist">${ms.map(mrow).join("")}</div>`;
+  /* Combats : tirage et gestion, tournoi par tournoi */
+  const tourCombats = t => {
+    const n = tourTeams(t.id).length, drawn = tourMatches(t.id).length > 0;
+    let size = 1; while (size < n) size *= 2;
+    let rounds = "";
+    for (let r = 1; r <= totalRounds(t.id); r++){
+      const ms = tourMatches(t.id).filter(m => m.round === r && !m.bye).sort((a, b) => a.slot - b.slot);
+      if (ms.length) rounds += `<h3 class="eyebrow" style="margin:22px 0 10px">${esc(roundName(r, t.id))}</h3><div class="mlist">${ms.map(mrow).join("")}</div>`;
     }
-    return `<section class="sec"><div class="sec-head"><div><h2>Gérer les combats</h2>
-      <p class="sub">Règle les cotes, ferme les paris quand le combat commence, puis déclare le vainqueur. Les paris sont réglés automatiquement.</p></div></div>${out}</section>`;
-  })();
-
+    return `<section class="sec"><div class="sec-head"><div><h2><span class="k">闘</span>${esc(t.name)}</h2>
+        <p class="sub">${esc(gradeRange(t))} · ${plural(n, "équipe inscrite", "équipes inscrites")}${n >= 2 && !drawn ? ` · tableau de ${size}${size - n ? `, ${plural(size - n, "exemption")} au premier tour` : ""}` : ""}</p></div>
+        ${t.id ? `<button class="btn${drawn ? " danger" : ""} sm" data-act="draw" data-tour="${t.id}" data-confirm="${drawn ? "Confirmer : effacer et retirer au sort" : "Confirmer le tirage"}" ${n < 2 ? "disabled" : ""}>${drawn ? "Retirer au sort" : "Tirer au sort le tableau"}</button>` : ""}</div>
+      ${drawn ? `<p class="hint" style="margin-top:0">Règle les cotes, ferme les paris quand le combat commence, puis déclare le vainqueur : les paris sont réglés automatiquement. « Retirer au sort » efface ce tableau et ses paris (mises rendues).</p>${rounds}`
+        : n < 2 ? emptyBox("組", "Il faut au moins 2 équipes dans ce tournoi pour tirer le tableau (Gérance → Équipes).")
+        : `<p class="hint" style="margin-top:0">Le tirage place les équipes au hasard et ouvre les paris des premiers combats avec une cote de ×2,00 par défaut.</p>`}
+    </section>`;
+  };
   const combats = () => `
-    <section class="sec"><div class="sec-head"><div><h2>Tirage du tableau</h2>
-      <p class="sub">${plural(n, "équipe inscrite", "équipes inscrites")}${n >= 2 ? ` · tableau de ${size}${size - n ? `, ${plural(size - n, "exemption")} au premier tour` : ""}` : ""}. Les équipes s'inscrivent dans Gérance → Équipes.</p></div></div>
-      <div class="panel"><p>${drawn ? "Le tableau est déjà tiré. Le retirer efface tous les combats <b>et tous les paris</b> (les mises non réglées sont rendues)." : "Le tirage place les équipes au hasard et ouvre les paris des premiers combats avec une cote de ×2,00 par défaut."}</p>
-      <button class="btn${drawn ? " danger" : ""}" data-act="draw" data-confirm="${drawn ? "Confirmer : tout effacer et retirer" : "Confirmer le tirage"}" ${n < 2 ? "disabled" : ""}>${drawn ? "Retirer le tableau" : "Tirer au sort le tableau"}</button></div>
-    </section>
-    ${manage}
+    ${S.tours.length ? "" : `<section class="sec"><div class="panel wallet"><div><b>Aucun tournoi dans ce Korin.</b></div><button class="btn" data-act="gtab" data-g="tournois">Créer les tournois</button></div></section>`}
+    ${tourList().map(tourCombats).join("")}
     <section class="sec"><div class="sec-head"><h2>Zone sensible</h2></div>
-      <div class="panel danger-zone"><p>Réinitialiser efface les équipes, les combats et les paris. Les mises non réglées sont rendues, les soldes des joueurs sont conservés. Action définitive.</p>
-      <div class="row"><button class="btn danger" data-act="reset" data-confirm="Confirmer : tout effacer">Réinitialiser le tournoi</button>
+      <div class="panel danger-zone"><p>Réinitialiser efface les équipes, les combats et les paris de tous les tournois de ce Korin (les tournois eux-mêmes restent). Les mises non réglées sont rendues, les bilans des joueurs sont conservés. Action définitive.</p>
+      <div class="row"><button class="btn danger" data-act="reset" data-confirm="Confirmer : tout effacer">Réinitialiser le Korin</button>
       ${backend.mode === "demo" ? `<button class="btn ghost" data-act="reseed" data-confirm="Confirmer">Recharger les données d'exemple</button>` : ""}</div></div>
     </section>`;
 
-  const body = {apercu:gApercu, combats, equipes:gEquipes, paris:gParis, historique:gHistorique,
+  const body = {apercu:gApercu, tournois:gTournois, combats, equipes:gEquipes, paris:gParis, historique:gHistorique,
     validation:() => requests, comptes:() => accounts, blacklist:() => blacklist}[gTab]();
   return head + nav + body;
 }
 
 /* Sous-onglets de la gérance : tout ce qui est réservé se trouve ici, nulle part ailleurs */
 let gTab = "apercu";
-const GTABS = [["apercu", "Aperçu"], ["validation", "Validation"], ["comptes", "Comptes et gérants"], ["combats", "Combats"], ["equipes", "Équipes"],
-  ["paris", "Paris"], ["historique", "Historique"], ["blacklist", "Blacklist"]];
+const GTABS = [["apercu", "Aperçu"], ["validation", "Validation"], ["comptes", "Comptes et gérants"], ["tournois", "Tournois"], ["equipes", "Équipes"],
+  ["combats", "Combats"], ["paris", "Paris"], ["historique", "Historique"], ["blacklist", "Blacklist"]];
 
 function mrow(m){
   const both = m.team_a && m.team_b;
@@ -1662,7 +1806,10 @@ function shuffle(a){ a = a.slice(); for (let i = a.length - 1; i > 0; i--){ cons
 
 const ACTIONS = {
   "del-team": b => run(() => deleteTeam(b.dataset.id), "Équipe retirée."),
-  "draw": () => run(() => drawBracket(shuffle(S.teams.map(t => t.id))), "Tableau tiré au sort."),
+  "draw": b => run(() => drawBracket(b.dataset.tour, shuffle(tourTeams(b.dataset.tour).map(t => t.id))), "Tableau tiré au sort."),
+  "tour-grades": () => run(addToursByGrade, "Un tournoi par grade créé. Supprime ceux qui ne servent pas."),
+  "tour-del": b => run(() => deleteTour(b.dataset.id), "Tournoi supprimé."),
+  "tour-sel": b => { selTour = b.dataset.id; render(true); },
   "odds": b => run(() => setOdds(b.dataset.id, $("oa-" + b.dataset.id).value, $("ob-" + b.dataset.id).value), "Cotes enregistrées."),
   "status": b => run(() => setStatus(b.dataset.id, b.dataset.st), b.dataset.st === "ouvert" ? "Paris rouverts." : "Paris fermés."),
   "win": b => run(() => declareWinner(b.dataset.id, b.dataset.team), "Vainqueur déclaré, paris réglés."),
@@ -1716,7 +1863,8 @@ document.addEventListener("submit", e => {
   if (!f) return;
   e.preventDefault();
   const k = f.dataset.form;
-  if (k === "team") run(() => addTeam({name:$("tf-name").value, p1:$("tf-p1").value, p2:$("tf-p2").value}), "Équipe inscrite.", true);
+  if (k === "team") run(async () => { lastTour = $("tf-tour").value; await addTeam({name:$("tf-name").value, p1:$("tf-p1").value, p2:$("tf-p2").value, tour:lastTour}); }, "Équipe inscrite.", true);
+  if (k === "tour-add") run(() => addTour($("tr-name").value, $("tr-min").value, $("tr-max").value || $("tr-min").value), "Tournoi créé.", true);
   if (k === "bet") run(() => addBet({bettor:($("bf-who") || {}).value, userId:($("bf-user") || {}).value, matchId:$("bet-match").value, teamId:$("bet-team").value, amount:$("bf-amount").value}), "Pari enregistré.", true);
   if (k === "ed-create") run(() => createEdition($("ed-name").value, $("ed-when").value), "Korin programmé.", true);
   if (k === "ed-date") run(async () => { await renameEdition($("ed-rename").value); await setEditionDate($("ed-when2").value); }, "Korin mis à jour.", true);
@@ -1774,7 +1922,7 @@ init();
 /* ---------- Mise à jour automatique ----------
    GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
    avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
-const APP_VERSION = "2026-10-06.2";
+const APP_VERSION = "2026-10-06.3";
 let updateShown = false;
 async function checkUpdate(){
   if (updateShown) return;

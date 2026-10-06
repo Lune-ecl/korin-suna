@@ -65,7 +65,8 @@ alter table public.bets    add column if not exists edition_id uuid references p
 alter table public.teams   drop constraint if exists teams_name_key;
 alter table public.matches drop constraint if exists matches_round_slot_key;
 create unique index if not exists teams_nom_par_edition   on public.teams (edition_id, name);
-create unique index if not exists matches_place_par_edition on public.matches (edition_id, round, slot);
+-- Les places du tableau sont uniques par tournoi (un Korin peut avoir plusieurs tournois, voir plus bas)
+drop index if exists public.matches_place_par_edition;
 
 -- Vrai si l'édition est en cours et sa date d'ouverture est passée
 create or replace function public.edition_open(p_edition uuid)
@@ -76,6 +77,39 @@ as $$
   select exists (select 1 from public.editions where id = p_edition and ended_at is null and starts_at <= now());
 $$;
 grant execute on function public.edition_open(uuid) to anon, authenticated;
+
+-- =============================================================
+--  Tournois : un Korin peut avoir plusieurs tournois, chacun pour
+--  une tranche de grades (ex. Genin, Chunin, Jonin), avec ses propres
+--  équipes, son propre tableau et ses propres champions.
+-- =============================================================
+create table if not exists public.tournaments (
+  id          uuid primary key default gen_random_uuid(),
+  edition_id  uuid not null references public.editions(id) on delete cascade,
+  name        text not null,
+  grade_min   text,                           -- null = pas de minimum
+  grade_max   text,                           -- null = pas de maximum
+  position    int  not null default 0,
+  created_at  timestamptz not null default now()
+);
+create unique index if not exists tournaments_nom_par_edition on public.tournaments (edition_id, name);
+
+alter table public.teams   add column if not exists tournament_id uuid references public.tournaments(id) on delete cascade;
+alter table public.matches add column if not exists tournament_id uuid references public.tournaments(id) on delete cascade;
+create unique index if not exists matches_place_par_tournoi on public.matches (tournament_id, round, slot);
+
+-- Anciens Korin créés avant les tournois : leurs équipes et combats vont dans un « Tournoi principal »
+do $$
+declare e uuid; t uuid;
+begin
+  for e in select distinct edition_id from public.teams where tournament_id is null and edition_id is not null
+           union select distinct edition_id from public.matches where tournament_id is null and edition_id is not null loop
+    insert into public.tournaments (edition_id, name) values (e, 'Tournoi principal')
+      on conflict (edition_id, name) do update set name = excluded.name returning id into t;
+    update public.teams   set tournament_id = t where edition_id = e and tournament_id is null;
+    update public.matches set tournament_id = t where edition_id = e and tournament_id is null;
+  end loop;
+end $$;
 
 -- Organisateurs (famille Chiiketsu)
 create table if not exists public.admins (
@@ -144,9 +178,21 @@ returns trigger
 language plpgsql security definer
 set search_path = public
 as $$
+declare t public.tournaments; p text; g text;
 begin
   if public.is_blacklisted(new.player1) then raise exception '% est sur la blacklist du Korin.', new.player1; end if;
   if public.is_blacklisted(new.player2) then raise exception '% est sur la blacklist du Korin.', new.player2; end if;
+  -- Un combattant qui a un compte doit avoir un grade dans la tranche du tournoi
+  select * into t from public.tournaments where id = new.tournament_id;
+  if found then
+    foreach p in array array[new.player1, new.player2] loop
+      select grade into g from public.profiles where public.name_key(username) = public.name_key(p) limit 1;
+      if g is not null and not public.grade_in_range(g, t.grade_min, t.grade_max) then
+        raise exception '% est % : le % est réservé aux grades % à %.', p, g, t.name,
+          coalesce(t.grade_min, 'Apprenti Genin'), coalesce(t.grade_max, 'Kazekage');
+      end if;
+    end loop;
+  end if;
   return new;
 end;
 $$;
@@ -175,6 +221,16 @@ returns boolean
 language sql immutable
 as $$
   select coalesce(array_position(public.grade_list(), p_grade) > array_position(public.grade_list(), 'Tokubetsu Jonin'), false);
+$$;
+
+-- Vrai si le grade est dans la tranche [p_min, p_max] d'un tournoi (null = pas de limite)
+create or replace function public.grade_in_range(p_grade text, p_min text, p_max text)
+returns boolean
+language sql immutable
+as $$
+  select array_position(public.grade_list(), p_grade) between
+         coalesce(array_position(public.grade_list(), p_min), 1)
+     and coalesce(array_position(public.grade_list(), p_max), array_length(public.grade_list(), 1));
 $$;
 
 -- Crée automatiquement le profil quand quelqu'un s'inscrit sur le site (inscription libre, sauf blacklist)
@@ -461,6 +517,15 @@ create policy "lecture publique" on public.editions for select using (true);
 create policy "gerance gere les editions" on public.editions for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
+-- Tournois : visibles du public avec leur Korin, gérés par la gérance
+alter table public.tournaments enable row level security;
+drop policy if exists "lecture publique" on public.tournaments;
+drop policy if exists "gerance gere les tournois" on public.tournaments;
+create policy "lecture publique" on public.tournaments for select
+  using (public.is_admin() or public.edition_open(edition_id));
+create policy "gerance gere les tournois" on public.tournaments for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
 -- Équipes et combats : visibles du public seulement quand le Korin est ouvert
 -- (avant la date d'ouverture et après la clôture, seule la gérance les voit)
 drop policy if exists "lecture publique" on public.teams;
@@ -516,24 +581,30 @@ grant execute on function public.leaderboard() to anon, authenticated;
 
 -- Résultats des équipes de chaque Korin ouvert ou terminé (pour le classement public des combattants et des équipes).
 -- Ne donne que les résultats sportifs : ni paris, ni Korin encore secret (pas ouvert).
+-- Une ligne par équipe : la finale et les champions se calculent tournoi par tournoi.
+drop function if exists public.korin_results();
 create or replace function public.korin_results()
-returns table (edition_id uuid, edition_name text, starts_at timestamptz, ended_at timestamptz,
+returns table (edition_id uuid, edition_name text, starts_at timestamptz, ended_at timestamptz, tournament text,
                team text, player1 text, player2 text, wins int, losses int, reached int, rounds int,
                champion boolean, finalist boolean)
 language sql stable security definer
 set search_path = public
 as $$
   with ed as (select * from public.editions e where e.ended_at is not null or e.starts_at <= now()),
-       r  as (select m.edition_id, max(m.round) as rounds from public.matches m group by m.edition_id)
-  select e.id, e.name, e.starts_at, e.ended_at, t.name, t.player1, t.player2,
+       r  as (select m.edition_id, m.tournament_id, max(m.round) as rounds from public.matches m group by m.edition_id, m.tournament_id)
+  select e.id, e.name, e.starts_at, e.ended_at, tr.name, t.name, t.player1, t.player2,
     (select count(*) from public.matches m where m.edition_id = e.id and m.winner = t.id and not m.bye)::int,
     (select count(*) from public.matches m where m.edition_id = e.id and m.status = 'termine' and m.winner is not null
        and m.winner <> t.id and (m.team_a = t.id or m.team_b = t.id))::int,
     coalesce((select max(m.round) from public.matches m where m.edition_id = e.id and (m.team_a = t.id or m.team_b = t.id)), 0)::int,
     coalesce(r.rounds, 0)::int,
-    exists (select 1 from public.matches m where m.edition_id = e.id and m.round = r.rounds and m.slot = 0 and m.winner = t.id),
-    exists (select 1 from public.matches m where m.edition_id = e.id and m.round = r.rounds and m.slot = 0 and (m.team_a = t.id or m.team_b = t.id))
-  from ed e join public.teams t on t.edition_id = e.id left join r on r.edition_id = e.id;
+    exists (select 1 from public.matches m where m.edition_id = e.id and m.tournament_id is not distinct from t.tournament_id
+            and m.round = r.rounds and m.slot = 0 and m.winner = t.id),
+    exists (select 1 from public.matches m where m.edition_id = e.id and m.tournament_id is not distinct from t.tournament_id
+            and m.round = r.rounds and m.slot = 0 and (m.team_a = t.id or m.team_b = t.id))
+  from ed e join public.teams t on t.edition_id = e.id
+       left join public.tournaments tr on tr.id = t.tournament_id
+       left join r on r.edition_id = e.id and r.tournament_id is not distinct from t.tournament_id;
 $$;
 grant execute on function public.korin_results() to anon, authenticated;
 
@@ -577,6 +648,7 @@ begin
   begin alter publication supabase_realtime add table public.ledger;   exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.blacklist; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.editions;  exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.tournaments; exception when duplicate_object then null; end;
 end $$;
 
 -- =============================================================
