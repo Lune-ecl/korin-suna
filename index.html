@@ -45,19 +45,14 @@ button,input,select{font:inherit;color:inherit}
 .tab-orga{margin-left:auto}
 .tab-orga[hidden]+.tab-compte{margin-left:auto}
 .tab-compte{color:var(--gold)}
-@media (max-width:760px){
-  .top .wrap{flex-wrap:wrap;gap:0}
-  .brand{padding-top:10px}
-  .tabs{flex-basis:100%}
-  .tab{padding:13px 10px 12px}
-  .tab-orga,.tab-orga[hidden]+.tab-compte{margin-left:0}
-}
+.tab .tl-short{display:none}
 .wallet{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 24px}
+.wallet>*{min-width:0;max-width:100%}
 .wallet .v{font:700 clamp(2rem,5vw,2.8rem)/1 var(--f-title);color:var(--gold);font-variant-numeric:tabular-nums}
 .wallet .v small{font:500 18px var(--f-kanji);color:var(--blood);margin-left:6px}
 .adj{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
 .adj input{width:96px;padding:7px 8px}
-.adj select{width:auto;min-width:180px;padding:7px 8px}
+.adj select{width:auto;min-width:0;max-width:100%;flex:1 1 180px;padding:7px 8px}
 .notice{border-bottom:1px solid var(--line-soft);background:rgba(110,20,24,.28);color:var(--sand);font-size:13.5px}
 .notice .wrap{padding-block:8px}
 .notice b{color:var(--gold);font-weight:600}
@@ -234,6 +229,51 @@ input:focus,select:focus{border-color:var(--gold);outline:none;box-shadow:0 0 0 
 footer{border-top:1px solid var(--line-soft);color:var(--muted);font-size:13px}
 footer .wrap{padding-block:18px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ---------- Mode téléphone (en fin de feuille pour passer devant les règles ci-dessus) ---------- */
+/* Téléphone : les onglets deviennent une barre fixe en bas de l'écran, avec une icône (kanji) par onglet */
+@media (max-width:760px){
+  /* backdrop-filter sur l'en-tête rattacherait la barre fixe à l'en-tête au lieu de l'écran */
+  .top{backdrop-filter:none;background:rgba(12,6,6,.97)}
+  .top .wrap{min-height:52px}
+  .tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;gap:0;overflow:visible;
+    background:rgba(12,6,6,.97);backdrop-filter:blur(8px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
+  .tab{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 2px 9px;
+    border-bottom:0;border-top:2px solid transparent;font-size:9.5px;letter-spacing:.06em}
+  .tab::before{content:attr(data-icon);font:700 19px/1 var(--f-kanji);color:var(--muted)}
+  .tab[aria-current="page"]{border-top-color:var(--gold)}
+  .tab[aria-current="page"]::before{color:var(--blood)}
+  .tab .tl-long{display:none}
+  .tab .tl-short{display:inline}
+  .tab-orga,.tab-orga[hidden]+.tab-compte{margin-left:0}
+  body{padding-bottom:calc(64px + env(safe-area-inset-bottom,0px))}
+  .toast{bottom:calc(78px + env(safe-area-inset-bottom,0px))}
+  main{padding-block:18px 40px}
+  .sec{margin-top:34px}
+  /* Sous-onglets de la gérance : une seule ligne qu'on fait glisser */
+  .gnav{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-inline:-20px;padding-inline:20px}
+  .gnav::-webkit-scrollbar{display:none}
+  .gnav .btn{flex-shrink:0}
+  /* Tableau du tournoi : les tours les uns sous les autres */
+  .bracket-scroll{overflow:visible}
+  .bracket{grid-auto-flow:row;grid-auto-columns:auto;min-width:0;gap:22px}
+  .round:not(:last-child) .bm::after{display:none}
+  .round-list{gap:10px}
+}
+/* Petits écrans : chaque ligne de tableau devient une fiche (libellés ajoutés par labelTables) */
+@media (max-width:640px){
+  .tbl-wrap{overflow:visible;border:0;background:none}
+  .tbl-wrap table,.tbl-wrap tbody,.tbl-wrap tr,.tbl-wrap td{display:block;width:100%}
+  .tbl-wrap thead{display:none}
+  .tbl-wrap tr{background:var(--panel);border:1px solid var(--line-soft);margin-bottom:10px;padding:6px 14px}
+  .tbl-wrap tr:last-child td{border-bottom:0}
+  .tbl-wrap td{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:7px 0;border-bottom:1px solid var(--line-soft);text-align:right;white-space:normal}
+  .tbl-wrap td:last-child{border-bottom:0}
+  .tbl-wrap td::before{content:attr(data-label);font:600 10.5px/1.4 var(--f-body);letter-spacing:.12em;text-transform:uppercase;color:var(--gold-dim);text-align:left;flex-shrink:0}
+  .tbl-wrap td[data-label=""]::before{content:none}
+  .tbl-wrap td[data-label=""]{justify-content:flex-end}
+  .tbl-wrap td.rank{width:auto;text-align:left;justify-content:flex-start;font-size:20px;padding-bottom:2px;border-bottom:0}
+  .tbl-wrap td .adj{justify-content:flex-end}
+}
 </style>
 </head>
 <body>
@@ -241,12 +281,12 @@ footer .wrap{padding-block:18px;display:flex;justify-content:space-between;gap:1
   <div class="wrap">
     <button class="brand" data-tab="tableau" aria-label="Tableau du Korin"><span class="mini-seal">血契</span><b>Korin</b></button>
     <nav class="tabs" id="tabs" aria-label="Sections">
-      <button class="tab" data-tab="tableau">Tableau</button>
-      <button class="tab" data-tab="equipes">Équipes</button>
-      <button class="tab" data-tab="paris">Paris</button>
-      <button class="tab" data-tab="classement">Classement</button>
-      <button class="tab tab-orga" data-tab="orga" id="tab-orga">Gérance</button>
-      <button class="tab tab-compte" data-tab="compte" id="tab-compte">Connexion</button>
+      <button class="tab" data-tab="tableau" data-icon="闘">Tableau</button>
+      <button class="tab" data-tab="equipes" data-icon="組">Équipes</button>
+      <button class="tab" data-tab="paris" data-icon="賭">Paris</button>
+      <button class="tab" data-tab="classement" data-icon="番">Classement</button>
+      <button class="tab tab-orga" data-tab="orga" id="tab-orga" data-icon="契">Gérance</button>
+      <button class="tab tab-compte" data-tab="compte" id="tab-compte" data-icon="印">Connexion</button>
     </nav>
   </div>
 </header>
@@ -939,7 +979,7 @@ function pendingNotice(){
   const n = (accountList || []).filter(a => a.grade_pending).length;
   return !n ? "" : `<section class="sec"><div class="panel wallet" style="border-color:var(--gold)">
     <div><b>${plural(n, "demande de grade", "demandes de grade")} à valider</b><p class="hint" style="margin-top:4px">Grades au-dessus de Tokubetsu Jonin.</p></div>
-    <button class="btn" data-act="gtab" data-g="comptes">Voir les demandes</button></div></section>`;
+    <button class="btn" data-act="gtab" data-g="validation">Voir les demandes</button></div></section>`;
 }
 
 /* Gérance → Aperçu : chiffres clés, avec le détail des paris (réservé à la gérance) */
@@ -1380,14 +1420,14 @@ function vOrga(){
   const n = S.teams.length;
   let size = 1; while (size < n) size *= 2;
   const drawn = S.matches.length > 0;
-  const tabs = GTABS.filter(([k]) => (backend.mode === "live" || k !== "comptes") && (S.cur || !["combats", "equipes", "paris"].includes(k)));
+  const tabs = GTABS.filter(([k]) => (backend.mode === "live" || !["comptes", "validation"].includes(k)) && (S.cur || !["combats", "equipes", "paris"].includes(k)));
   if (!tabs.some(([k]) => k === gTab)) gTab = "apercu";
   const pending = (accountList || []).filter(a => a.grade_pending);
-  const nav = `<div class="row" role="tablist" aria-label="Sections de la gérance">${tabs.map(([k, l]) =>
-    `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}${k === "comptes" && pending.length ? ` · ${pending.length} à valider` : ""}</button>`).join("")}</div>`;
+  const nav = `<div class="row gnav" role="tablist" aria-label="Sections de la gérance">${tabs.map(([k, l]) =>
+    `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}${k === "validation" && pending.length ? ` · ${pending.length}` : ""}</button>`).join("")}</div>`;
 
   /* Demandes de grade au-dessus de Tokubetsu Jonin (nouvelles inscriptions ou montées en grade) */
-  const requests = !pending.length ? "" : `<section class="sec"><div class="panel" style="border-color:var(--gold)">
+  const requests = !pending.length ? `<section class="sec">${emptyBox("印", "Aucune demande de grade en attente.")}<p class="hint">Les grades au-dessus de Tokubetsu Jonin (Jonin, Commandant Jonin, Kazekage) arrivent ici pour validation, à l'inscription comme lors d'une montée en grade.</p></section>` : `<section class="sec"><div class="panel" style="border-color:var(--gold)">
       <div class="sec-head" style="margin-bottom:10px"><div><h2>Demandes de grade à valider · ${pending.length}</h2>
         <p class="sub">Grades au-dessus de Tokubetsu Jonin. Une nouvelle inscription ne peut pas parier tant qu'elle n'est pas validée.</p></div></div>
       <div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Grade actuel</th><th>Grade demandé</th><th></th><th></th></tr></thead><tbody>
@@ -1494,13 +1534,13 @@ function vOrga(){
     </section>`;
 
   const body = {apercu:gApercu, combats, equipes:gEquipes, paris:gParis, historique:gHistorique,
-    comptes:() => requests + accounts, blacklist:() => blacklist}[gTab]();
+    validation:() => requests, comptes:() => accounts, blacklist:() => blacklist}[gTab]();
   return head + nav + body;
 }
 
 /* Sous-onglets de la gérance : tout ce qui est réservé se trouve ici, nulle part ailleurs */
 let gTab = "apercu";
-const GTABS = [["apercu", "Aperçu"], ["comptes", "Comptes et gérants"], ["combats", "Combats"], ["equipes", "Équipes"],
+const GTABS = [["apercu", "Aperçu"], ["validation", "Validation"], ["comptes", "Comptes et gérants"], ["combats", "Combats"], ["equipes", "Équipes"],
   ["paris", "Paris"], ["historique", "Historique"], ["blacklist", "Blacklist"]];
 
 function mrow(m){
@@ -1574,6 +1614,14 @@ const canSee = t => {
 };
 const homeTab = () => korinOpen() ? "tableau" : "classement";
 
+/* Sur téléphone, les lignes de tableau s'affichent en fiches : chaque cellule reçoit le titre de sa colonne */
+function labelTables(){
+  view.querySelectorAll(".tbl-wrap table").forEach(t => {
+    const heads = [...t.querySelectorAll("thead th")].map(th => th.textContent.trim());
+    t.querySelectorAll("tbody tr").forEach(tr => [...tr.children].forEach((td, i) => { td.dataset.label = heads[i] || ""; }));
+  });
+}
+
 function render(resetForm){
   if (!canSee(tab)){ tab = homeTab(); try { history.replaceState(null, "", "#" + tab); } catch(e){} resetForm = true; }
   const s = snapshot();
@@ -1583,7 +1631,9 @@ function render(resetForm){
   const live = backend.mode === "live";
   [...ORGA_ONLY, ...KORIN_ONLY].forEach(t => document.querySelectorAll(`.tab[data-tab="${t}"]`).forEach(b => { b.hidden = !canSee(t); }));
   document.querySelector(".brand").dataset.tab = homeTab();
-  $("tab-compte").textContent = !live ? "Compte" : backend.user ? (S.me ? fmtSigned(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
+  const long = !live ? "Compte" : backend.user ? (S.me ? fmtSigned(S.me.balance) + " 両 · " + S.me.username : "Mon compte") : "Connexion";
+  $("tab-compte").innerHTML = `<span class="tl-long">${esc(long)}</span><span class="tl-short">${backend.user ? "Compte" : "Connexion"}</span>`;
+  labelTables();
   document.querySelectorAll(".tab").forEach(b => { if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
 }
 
@@ -1724,7 +1774,7 @@ init();
 /* ---------- Mise à jour automatique ----------
    GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
    avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
-const APP_VERSION = "2026-10-06.1";
+const APP_VERSION = "2026-10-06.2";
 let updateShown = false;
 async function checkUpdate(){
   if (updateShown) return;
