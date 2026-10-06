@@ -290,7 +290,10 @@ const plural = (n, s, p) => n + " " + (n > 1 ? (p || s + "s") : s);
    à partir du nom sans accents ni majuscules (ryuta.chiiketsu@korin-suna.app). « Ryūta chiiketsu » ouvre donc le même compte. */
 /* Grades RP, dans l'ordre (même liste que public.grade_list() dans schema.sql) */
 const GRADES = ["Apprenti Genin", "Genin", "Genin confirmé", "Chunin", "Konin", "Tokubetsu Jonin", "Jonin", "Commandant Jonin", "Kazekage"];
-const gradeSelect = (id, cur) => `<select id="${id}"><option value="">— Choisis un grade —</option>${GRADES.map(g => `<option${g === cur ? " selected" : ""}>${esc(g)}</option>`).join("")}</select>`;
+/* Au-dessus de Tokubetsu Jonin, le grade doit être validé par la gérance (anti-trolls) */
+const needsApproval = g => GRADES.indexOf(g) > GRADES.indexOf("Tokubetsu Jonin");
+const gradeSelect = (id, cur) => `<select id="${id}"><option value="">— Choisis un grade —</option>${GRADES.map(g =>
+  `<option value="${esc(g)}"${g === cur ? " selected" : ""}>${esc(g)}${needsApproval(g) ? " · validation de la gérance" : ""}</option>`).join("")}</select>`;
 const LOGIN_DOMAIN = "korin-suna.app";
 /* Même règle que public.name_key() dans schema.sql (sert aussi pour la blacklist) */
 const nameKey = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
@@ -371,11 +374,11 @@ function supaBackend(){
       let me = null, ledger = [], blacklist = [];
       if (this.user){
         const [p, l] = await Promise.all([
-          sb.from("profiles").select("username, balance, grade").eq("user_id", this.user.id).maybeSingle(),
+          sb.from("profiles").select("username, balance, grade, grade_pending, approved").eq("user_id", this.user.id).maybeSingle(),
           sb.from("ledger").select("*").eq("user_id", this.user.id).order("created_at", {ascending:false}).limit(100)
         ]);
         [p, l].forEach(chk);
-        me = p.data ? {username:p.data.username, balance:Number(p.data.balance), grade:p.data.grade || "", banned:false} : null;
+        me = p.data ? {username:p.data.username, balance:Number(p.data.balance), grade:p.data.grade || "", gradePending:p.data.grade_pending || "", approved:p.data.approved !== false, banned:false} : null;
         if (me) me.banned = !!soft(await sb.rpc("is_blacklisted", {p_name:me.username}));
         ledger = l.data;
         if (this.isAdmin) blacklist = soft(await sb.from("blacklist").select("*").order("name")) || [];
@@ -421,7 +424,7 @@ function supaBackend(){
     },
     async accounts(){
       const [p, a] = await Promise.all([
-        sb.from("profiles").select("user_id, username, created_at, balance, grade").order("username"),
+        sb.from("profiles").select("user_id, username, created_at, balance, grade, grade_pending, approved").order("username"),
         sb.from("admins").select("user_id")
       ]);
       [p, a].forEach(chk);
@@ -433,6 +436,7 @@ function supaBackend(){
       if (on) chk(await sb.from("admins").insert([{user_id:userId}]));
       else chk(await sb.from("admins").delete().eq("user_id", userId));
     },
+    async reviewGrade(userId, accept){ chk(await sb.rpc("review_grade", {p_user:userId, p_accept:accept})); },
     async setGrade(userId, grade){
       if (!GRADES.includes(grade)) fail("Choisis un grade.");
       chk(await sb.rpc("set_grade", {p_user:userId, p_grade:grade}));
@@ -930,16 +934,24 @@ function korinPanel(){
     </div></section>`;
 }
 
+/* Rappel en haut de l'Aperçu : demandes de grade en attente */
+function pendingNotice(){
+  const n = (accountList || []).filter(a => a.grade_pending).length;
+  return !n ? "" : `<section class="sec"><div class="panel wallet" style="border-color:var(--gold)">
+    <div><b>${plural(n, "demande de grade", "demandes de grade")} à valider</b><p class="hint" style="margin-top:4px">Grades au-dessus de Tokubetsu Jonin.</p></div>
+    <button class="btn" data-act="gtab" data-g="comptes">Voir les demandes</button></div></section>`;
+}
+
 /* Gérance → Aperçu : chiffres clés, avec le détail des paris (réservé à la gérance) */
 function gApercu(){
-  if (!S.cur) return korinPanel();
+  if (!S.cur) return pendingNotice() + korinPanel();
   const inRace = S.teams.filter(t => teamStatus(t.id).key !== "out").length;
   const pend = S.bets.filter(b => b.status === "en_cours");
   const open = S.matches.filter(m => m.status === "ouvert");
   const done = S.matches.filter(m => m.status === "termine" && !m.bye).sort((a, b) => (b.decided_at || "").localeCompare(a.decided_at || "")).slice(0, 4);
   const c = champion();
   const accts = accountList || [];
-  return `${korinPanel()}
+  return `${pendingNotice()}${korinPanel()}
   ${c ?`<div class="panel" style="text-align:center;border-color:var(--gold);margin-top:22px"><span class="eyebrow">Champions du Korin</span>
     <div class="crown" style="border:0;background:none;padding:6px 0 0"><strong>${esc(c.name)}</strong><span>${esc(c.player1)} & ${esc(c.player2)}</span></div></div>` : ""}
   <div class="stats">
@@ -1097,6 +1109,7 @@ function vParis(){
   else if (!backend.user) form = `<section class="sec"><div class="panel wallet"><div><b>Envie de parier ?</b><p class="hint" style="margin-top:4px">Crée un compte ou connecte-toi, et parie tout de suite, sans limite : les ryos se règlent en RP avec la gérance. L'inscription est libre et immédiate.</p></div>
       <button class="btn" data-tab="compte">Se connecter</button></div></section>`;
   else if (S.me && S.me.banned) form = `<section class="sec"><div class="panel danger-zone"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div></section>`;
+  else if (S.me && S.me.approved === false && !isAdmin()) form = `<section class="sec"><div class="panel" style="border-color:var(--gold)"><p><b>Inscription en attente de validation.</b> Ton grade ${esc(S.me.gradePending)} doit être validé par la gérance avant que tu puisses parier.</p></div></section>`;
   else form = `<section class="sec"><div class="sec-head"><div><h2>Placer un pari</h2>
       <p class="sub">Mise ce que tu veux, il n'y a pas de limite : les ryos se règlent en RP avec la gérance. Ton bilan actuel : <b class="${balCls(S.me ? S.me.balance : 0)}">${fmtSigned(S.me ? S.me.balance : 0)} ryos</b>. Attention : un pari placé est définitif, il ne peut plus être retiré.</p></div></div>
       ${betFormHtml(false)}</section>`;
@@ -1331,10 +1344,13 @@ function vCompte(){
       <div class="row"><button class="btn" data-tab="paris">Parier</button><button class="btn ghost" data-act="logout">Se déconnecter</button></div>
     </div>
     ${me.banned ? `<div class="panel danger-zone" style="margin-top:12px"><p><b>Tu es sur la blacklist du Korin.</b> Tu ne peux plus parier sur ce tournoi.</p></div>` : ""}
-    <div class="panel wallet" style="margin-top:12px${me.grade ? "" : ";border-color:var(--gold)"}">
-      <div><div class="eyebrow">Grade</div><div class="v" style="font-size:1.6rem">${me.grade ? esc(me.grade) : '<span class="mut">Pas encore choisi</span>'}</div></div>
+    ${me.approved === false ? `<div class="panel" style="margin-top:12px;border-color:var(--gold)"><p><b>Inscription en attente de validation.</b> Tu as demandé le grade ${esc(me.gradePending)} : la gérance doit le valider avant que tu puisses parier.</p></div>` : ""}
+    <div class="panel wallet" style="margin-top:12px${me.grade || me.gradePending ? "" : ";border-color:var(--gold)"}">
+      <div><div class="eyebrow">Grade</div><div class="v" style="font-size:1.6rem">${me.grade ? esc(me.grade) : '<span class="mut">Pas encore choisi</span>'}</div>
+        ${me.gradePending ? `<p class="hint" style="margin-top:6px">Demande en cours : <b>${esc(me.gradePending)}</b>, en attente de validation par la gérance.</p>` : ""}</div>
       <div class="adj">${gradeSelect("grade-me", me.grade)}<button class="btn ${me.grade ? "ghost " : ""}sm" data-act="grade-me">${me.grade ? "Changer de grade" : "Enregistrer mon grade"}</button></div>
     </div>
+    <p class="hint">Les grades au-dessus de Tokubetsu Jonin (Jonin, Commandant Jonin, Kazekage) doivent être validés par la gérance.</p>
     ${(() => { const f = myFighter(); return `<div class="panel wallet" style="margin-top:12px">
       <div><div class="eyebrow">Classement des combattants</div><div class="v ${f && f.points ? "pos" : "mut"}">${plural(f ? f.points : 0, "point")}</div></div>
       <div>${f ? `<span class="eyebrow">Rang ${f.rank}</span>` : `<span class="mut" style="font-size:13px">Tu n'as encore combattu dans aucun Korin.</span>`}
@@ -1366,8 +1382,21 @@ function vOrga(){
   const drawn = S.matches.length > 0;
   const tabs = GTABS.filter(([k]) => (backend.mode === "live" || k !== "comptes") && (S.cur || !["combats", "equipes", "paris"].includes(k)));
   if (!tabs.some(([k]) => k === gTab)) gTab = "apercu";
+  const pending = (accountList || []).filter(a => a.grade_pending);
   const nav = `<div class="row" role="tablist" aria-label="Sections de la gérance">${tabs.map(([k, l]) =>
-    `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}</button>`).join("")}</div>`;
+    `<button class="btn sm ${gTab === k ? "" : "ghost"}" data-act="gtab" data-g="${k}" aria-pressed="${gTab === k}">${l}${k === "comptes" && pending.length ? ` · ${pending.length} à valider` : ""}</button>`).join("")}</div>`;
+
+  /* Demandes de grade au-dessus de Tokubetsu Jonin (nouvelles inscriptions ou montées en grade) */
+  const requests = !pending.length ? "" : `<section class="sec"><div class="panel" style="border-color:var(--gold)">
+      <div class="sec-head" style="margin-bottom:10px"><div><h2>Demandes de grade à valider · ${pending.length}</h2>
+        <p class="sub">Grades au-dessus de Tokubetsu Jonin. Une nouvelle inscription ne peut pas parier tant qu'elle n'est pas validée.</p></div></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Grade actuel</th><th>Grade demandé</th><th></th><th></th></tr></thead><tbody>
+      ${pending.map(a => `<tr><td class="who">${esc(a.username)}</td><td class="mut">${a.grade ? esc(a.grade) : "—"}</td><td><b class="pos">${esc(a.grade_pending)}</b></td>
+        <td>${a.approved === false ? '<span class="pill p-wait">Nouvelle inscription</span>' : '<span class="pill p-in">Montée en grade</span>'}</td>
+        <td class="num"><div class="adj"><button class="btn sm" data-act="grade-ok" data-id="${a.user_id}">Valider</button>
+          <button class="btn danger sm" data-act="grade-no" data-id="${a.user_id}" data-confirm="Confirmer">Refuser</button>
+          <button class="btn ghost sm" data-act="acct-sel" data-id="${a.user_id}">Gérer</button></div></td></tr>`).join("")}
+      </tbody></table></div></div></section>`;
 
   const accounts = backend.mode !== "live" ? "" : (() => {
     if (accountList === null) return `<section class="sec">${emptyBox("契", "Chargement des comptes…")}<p class="hint"><button class="btn ghost sm" data-act="load-accounts">Actualiser</button></p></section>`;
@@ -1419,7 +1448,7 @@ function vOrga(){
         <p class="sub">L'inscription est libre. Bilan négatif : le joueur doit des ryos ; positif : la gérance lui en doit. Clique sur « Gérer » pour un compte.</p></div>
         <label class="f filter"><span class="eyebrow">Chercher un nom</span><input id="acct-q" type="search" autocomplete="off" placeholder="Ex. Ryuta"></label></div>
       ${list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Nom</th><th>Grade</th><th>Rôle</th><th class="num">Bilan</th><th class="num">Inscrit le</th><th></th></tr></thead><tbody>
-        ${list.map(a => `<tr><td class="who">${esc(a.username)}${a.user_id === backend.user.id ? ' <span class="mut">(toi)</span>' : ""}</td><td>${a.grade ? esc(a.grade) : '<span class="mut">—</span>'}</td><td>${role(a)}</td>
+        ${list.map(a => `<tr><td class="who">${esc(a.username)}${a.user_id === backend.user.id ? ' <span class="mut">(toi)</span>' : ""}</td><td>${a.grade ? esc(a.grade) : '<span class="mut">—</span>'}${a.grade_pending ? ` <span class="pill p-wait">→ ${esc(a.grade_pending)} ?</span>` : ""}</td><td>${role(a)}</td>
           <td class="num"><b class="${balCls(a.balance)}">${fmtSigned(a.balance)}</b> 両</td><td class="num mut">${new Date(a.created_at).toLocaleDateString("fr-FR")}</td>
           <td class="num"><button class="btn ${a.user_id === selAcct ? "" : "ghost "}sm" data-act="acct-sel" data-id="${a.user_id}">Gérer</button></td></tr>`).join("")}
       </tbody></table></div>` : emptyBox("契", acctQ ? "Aucun compte ne correspond." : "Aucun compte pour l'instant.")}
@@ -1465,7 +1494,7 @@ function vOrga(){
     </section>`;
 
   const body = {apercu:gApercu, combats, equipes:gEquipes, paris:gParis, historique:gHistorique,
-    comptes:() => accounts, blacklist:() => blacklist}[gTab]();
+    comptes:() => requests + accounts, blacklist:() => blacklist}[gTab]();
   return head + nav + body;
 }
 
@@ -1602,7 +1631,13 @@ const ACTIONS = {
   "ed-close": () => run(closeEdition, "Korin clôturé et rangé dans l'historique."),
   "ed-del": b => run(() => deleteEdition(b.dataset.id), "Korin supprimé de l'historique."),
   "acct-sel": b => { selAcct = b.dataset.id; if (tab !== "orga" || gTab !== "comptes"){ gTab = "comptes"; go("orga"); } else { render(true); window.scrollTo({top:0}); } },
-  "grade-me": () => run(async () => { await backend.setGrade(backend.user.id, $("grade-me").value); await reload(); }, "Grade enregistré."),
+  "grade-me": () => run(async () => {
+    const g = $("grade-me").value;
+    await backend.setGrade(backend.user.id, g); await reload();
+    toast(needsApproval(g) && !isAdmin() ? `Demande envoyée : le grade ${g} doit être validé par la gérance.` : "Grade enregistré.");
+  }),
+  "grade-ok": b => run(async () => { await backend.reviewGrade(b.dataset.id, true); await reload(); }, "Grade validé."),
+  "grade-no": b => run(async () => { await backend.reviewGrade(b.dataset.id, false); await reload(); }, "Demande refusée."),
   "grade-set": b => run(async () => { await backend.setGrade(b.dataset.id, $("gr-" + b.dataset.id).value); await reload(); }, "Grade changé."),
   "acct-pw": b => run(async () => { await backend.setPassword(b.dataset.id, ($("pw-" + b.dataset.id) || {}).value); }, "Mot de passe changé. Donne-le au joueur.", true),
   "acct-del": b => run(async () => { await backend.deleteUser(b.dataset.id); selAcct = ""; await reload(); }, "Compte supprimé."),
@@ -1638,7 +1673,11 @@ document.addEventListener("submit", e => {
   if (k === "gerant") run(async () => { await backend.setOrga($("ger-user").value, true); await reload(); }, "Nommé gérant.", true);
   if (k === "blacklist") run(() => addBlacklist($("bl-name").value, $("bl-reason").value), "Ajouté à la blacklist.", true);
   if (k === "login") run(async () => { await backend.login($("lg-user").value, $("lg-pw").value); await reload(); }, "Connecté.", true);
-  if (k === "signup") run(async () => { await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value, $("lg-grade").value); authMode = "login"; await reload(); }, "Compte créé. Bienvenue !", true);
+  if (k === "signup") run(async () => {
+    const g = $("lg-grade").value;
+    await backend.signup($("lg-user").value, $("lg-pw").value, $("lg-pw2").value, g); authMode = "login"; await reload();
+    toast(needsApproval(g) ? `Compte créé. Le grade ${g} doit être validé par la gérance : tu pourras parier ensuite.` : "Compte créé. Bienvenue !");
+  }, null, true);
 });
 
 document.addEventListener("change", e => { if (e.target.id === "bet-match") syncBetForm(); if (e.target.id === "bet-team") updateGain(); });
@@ -1685,7 +1724,7 @@ init();
 /* ---------- Mise à jour automatique ----------
    GitHub Pages laisse les navigateurs garder la page en cache (10 min) : on compare APP_VERSION
    avec la version en ligne et on recharge. À CHANGER à chaque mise en ligne. */
-const APP_VERSION = "2026-10-05.1";
+const APP_VERSION = "2026-10-06.1";
 let updateShown = false;
 async function checkUpdate(){
   if (updateShown) return;

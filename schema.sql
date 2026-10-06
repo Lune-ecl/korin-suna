@@ -165,19 +165,35 @@ alter table public.profiles add column if not exists grade text;
 alter table public.profiles drop constraint if exists profiles_grade_check;
 alter table public.profiles add constraint profiles_grade_check check (grade is null or grade = any (public.grade_list()));
 
+-- Grades au-dessus de Tokubetsu Jonin (Jonin, Commandant Jonin, Kazekage) : validation de la gérance obligatoire
+alter table public.profiles add column if not exists grade_pending text;   -- grade demandé, en attente
+alter table public.profiles add column if not exists approved boolean not null default true;  -- false = inscription en attente
+alter table public.profiles drop constraint if exists profiles_grade_pending_check;
+alter table public.profiles add constraint profiles_grade_pending_check check (grade_pending is null or grade_pending = any (public.grade_list()));
+create or replace function public.grade_needs_approval(p_grade text)
+returns boolean
+language sql immutable
+as $$
+  select coalesce(array_position(public.grade_list(), p_grade) > array_position(public.grade_list(), 'Tokubetsu Jonin'), false);
+$$;
+
 -- Crée automatiquement le profil quand quelqu'un s'inscrit sur le site (inscription libre, sauf blacklist)
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql security definer
 set search_path = public
 as $$
+declare g text;
 begin
   if public.is_blacklisted(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))) then
     raise exception 'Ce nom est sur la blacklist du Korin.';
   end if;
-  insert into public.profiles (user_id, username, grade)
+  g := case when new.raw_user_meta_data->>'grade' = any (public.grade_list()) then new.raw_user_meta_data->>'grade' end;
+  insert into public.profiles (user_id, username, grade, grade_pending, approved)
   values (new.id, btrim(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1))),
-          case when new.raw_user_meta_data->>'grade' = any (public.grade_list()) then new.raw_user_meta_data->>'grade' end);
+          case when public.grade_needs_approval(g) then null else g end,
+          case when public.grade_needs_approval(g) then g end,
+          not public.grade_needs_approval(g));
   return new;
 end;
 $$;
@@ -302,12 +318,40 @@ begin
   if auth.uid() is null then raise exception 'Connecte-toi.'; end if;
   if p_user <> auth.uid() and not public.is_admin() then raise exception 'Tu ne peux changer que ton propre grade.'; end if;
   if not (p_grade = any (public.grade_list())) then raise exception 'Grade inconnu.'; end if;
-  update public.profiles set grade = p_grade where user_id = p_user;
+  if public.is_admin() then
+    -- la gérance fixe le grade directement (et valide le compte)
+    update public.profiles set grade = p_grade, grade_pending = null, approved = true where user_id = p_user;
+  elsif public.grade_needs_approval(p_grade) then
+    -- grade haut : simple demande, le grade actuel reste en place
+    update public.profiles set grade_pending = p_grade where user_id = p_user;
+  else
+    update public.profiles set grade = p_grade, grade_pending = null where user_id = p_user;
+  end if;
   if not found then raise exception 'Compte introuvable.'; end if;
 end;
 $$;
 revoke execute on function public.set_grade(uuid, text) from public, anon;
 grant  execute on function public.set_grade(uuid, text) to authenticated;
+
+-- La gérance valide ou refuse une demande de grade (et l'inscription qui va avec)
+create or replace function public.review_grade(p_user uuid, p_accept boolean)
+returns void
+language plpgsql security definer
+set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception 'Réservé à la gérance.'; end if;
+  if p_accept then
+    update public.profiles set grade = coalesce(grade_pending, grade), grade_pending = null, approved = true where user_id = p_user;
+  else
+    -- refus : la demande est effacée, le joueur choisira un autre grade (la gérance peut aussi le blacklister ou le supprimer)
+    update public.profiles set grade_pending = null, approved = true where user_id = p_user;
+  end if;
+  if not found then raise exception 'Compte introuvable.'; end if;
+end;
+$$;
+revoke execute on function public.review_grade(uuid, boolean) from public, anon;
+grant  execute on function public.review_grade(uuid, boolean) to authenticated;
 
 -- Nouveau pari : vérifie le combat, gèle la cote, prélève la mise
 create or replace function public.bets_before_insert()
@@ -338,6 +382,9 @@ begin
     select username into uname from public.profiles where user_id = new.user_id;
     if uname is null then raise exception 'Compte introuvable.'; end if;
     new.bettor := uname;
+    if not public.is_admin() and exists (select 1 from public.profiles where user_id = new.user_id and not approved) then
+      raise exception 'Ton inscription doit d''abord être validée par la gérance.';
+    end if;
     if public.is_blacklisted(uname) then
       raise exception 'Ce compte est sur la blacklist du Korin : paris interdits.';
     end if;
